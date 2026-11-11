@@ -1,0 +1,32 @@
+#!/bin/bash
+# Collects information from the node (and optionally from the storage, read-only
+# commands) for troubleshooting. Writes collect-<host>-<date>.txt (ignored by git).
+#   ./scripts/collect-info.sh [storeid]
+set -uo pipefail
+ST="${1:-}"
+OUT="collect-$(hostname)-$(date +%Y%m%d-%H%M%S).txt"
+
+run() { echo; echo "### $*"; eval "$@" 2>&1; }
+{
+    run pveversion -v
+    run "perl -MPVE::Storage -e 'print PVE::Storage::APIVER, q{ }, PVE::Storage::APIAGE, qq{\n}'"
+    run "ls -l /usr/share/perl5/PVE/Storage/Custom/"
+    run "grep -A15 '^storwize:' /etc/pve/storage.cfg"
+    run "pvesm status"
+    run "multipath -ll"
+    run "cat /etc/multipath.conf"
+    run "for h in /sys/class/fc_host/host*; do echo \$h \$(cat \$h/port_name) \$(cat \$h/port_state) \$(cat \$h/speed); done"
+    run "iscsiadm -m session"
+    run "lsblk -o NAME,SIZE,TYPE,VENDOR,MODEL,WWN"
+    run "systemctl status multipathd --no-pager | head -5"
+    run "pve-ibm-storage list"
+    run "pve-ibm-storage stale-paths"
+    if [ -n "$ST" ]; then
+        run "pve-ibm-storage info $ST"
+        run "pve-ibm-storage inventory $ST"
+        SSH="perl -MPVE::Storage -MPVE::Storage::Custom::StorwizePlugin -e 'my \$s=PVE::Storage::config()->{ids}->{$ST}; my \$P=q{PVE::Storage::Custom::StorwizePlugin}; for my \$c (qw(lssystem lsmdiskgrp lshost lshostcluster lsvdisk lsfcmap lslicense)) { print qq{-- \$c\n}; my \$r = eval { \$P->can(q{sw_list})->(\$s, q{$ST}, \$c, []) }; print \$@ if \$@; print join(q{:}, map { \$_ // q{} } %\$_), qq{\n} for @{\$r // []}; }'"
+        run "$SSH"
+    fi
+    run "journalctl -u pvedaemon -u pvestatd --since '-1h' --no-pager | grep -i storwize | tail -50"
+} > "$OUT"
+echo "written: $OUT  (review before sharing - it contains IPs and WWPNs)"

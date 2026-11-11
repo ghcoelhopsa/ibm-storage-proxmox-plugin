@@ -1,0 +1,30 @@
+# /etc/multipath.conf - Proxmox VE + IBM Storage Virtualize (SCSI product "2145")
+# The values below are the same ones multipath-tools 0.11 already ships built in
+# for the 2145 (check with: multipath -t | grep -A12 '"2145"') and follow the
+# IBM recommendation for Linux (ALUA, group_by_prio). Change them only if needed.
+
+defaults {
+    user_friendly_names no      # the plugin uses /dev/disk/by-id/dm-uuid-mpath-3<UID>
+    find_multipaths     yes
+}
+
+blacklist {
+    # local boot disk(s) - find the wwid with: /lib/udev/scsi_id -g -u -d /dev/sda
+    # wwid 3600605b009d95f70281a8a63107b034c
+}
+
+devices {
+    device {
+        vendor               "IBM"
+        product              "2145"
+        path_grouping_policy group_by_prio
+        prio                 alua
+        path_checker         tur
+        path_selector        "service-time 0"
+        failback             immediate
+        no_path_retry        5
+        rr_weight            uniform
+        fast_io_fail_tmo     5
+        dev_loss_tmo         120
+    }
+}

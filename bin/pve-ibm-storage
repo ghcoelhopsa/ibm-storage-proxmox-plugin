@@ -1,0 +1,240 @@
+#!/usr/bin/perl
+# pve-ibm-storage - registry and inventory of the IBM Storage Virtualize storages
+# (Storwize/FlashSystem/SVC) configured in Proxmox VE.
+#
+#   pve-ibm-storage list                 registered storages + state
+#   pve-ibm-storage info <storeid>       system, pool, hosts, features by firmware
+#   pve-ibm-storage inventory [storeid]  VM/CT <-> volume (UID, size, snapshots)
+#   pve-ibm-storage orphans [storeid]    volumes with the prefix that no VM/CT uses
+#   pve-ibm-storage stale-paths          local multipath maps with no volume on any array
+#
+# Global option: --json (output for the web panel)
+
+use strict;
+use warnings;
+
+use JSON;
+use PVE::Storage;
+use PVE::Storage::Custom::StorwizePlugin;
+
+my $P = 'PVE::Storage::Custom::StorwizePlugin';
+
+my $json = 0;
+@ARGV = grep { $_ eq '--json' ? (($json = 1), 0) : 1 } @ARGV;
+my $cmd = shift(@ARGV) // 'help';
+
+my $cfg = PVE::Storage::config();
+my %stores = map { $_ => $cfg->{ids}->{$_} }
+    grep { ($cfg->{ids}->{$_}->{type} // '') =~ m/^(?:storwize|flashsystem)$/ } keys %{ $cfg->{ids} };
+
+sub out {
+    my ($data, $cols) = @_;
+    if ($json) {
+        print JSON->new->canonical->pretty->encode($data);
+        return;
+    }
+    my @rows = @$data;
+    my %w = map { $_ => length($_) } @$cols;
+    for my $r (@rows) {
+        for my $c (@$cols) {
+            my $l = length($r->{$c} // '');
+            $w{$c} = $l if $l > $w{$c};
+        }
+    }
+    print join('  ', map { sprintf("%-*s", $w{$_}, uc($_)) } @$cols), "\n";
+    for my $r (@rows) {
+        print join('  ', map { sprintf("%-*s", $w{$_}, $r->{$_} // '') } @$cols), "\n";
+    }
+}
+
+sub human {
+    my ($b) = @_;
+    return '' if !defined($b);
+    my @u = qw(B KiB MiB GiB TiB PiB);
+    my $i = 0;
+    while ($b >= 1024 && $i < $#u) { $b /= 1024; $i++; }
+    return sprintf($i ? "%.1f %s" : "%d %s", $b, $u[$i]);
+}
+
+sub pick_stores {
+    my ($id) = @_;
+    if (defined($id)) {
+        die "storage '$id' is not of type storwize\n" if !$stores{$id};
+        return ($id);
+    }
+    return sort keys %stores;
+}
+
+# all VM/CT configs of the cluster: volid -> [ {vmid, type, key, name, node} ]
+sub config_refs {
+    my $refs = {};
+    for my $f (glob('/etc/pve/nodes/*/qemu-server/*.conf'), glob('/etc/pve/nodes/*/lxc/*.conf')) {
+        my ($node, $type, $vmid) = $f =~ m|/nodes/([^/]+)/(qemu-server\|lxc)/(\d+)\.conf$| or next;
+        open(my $fh, '<', $f) or next;
+        my ($name, $section) = ('', 'current');
+        while (my $l = <$fh>) {
+            $section = $1 if $l =~ m/^\[([^\]]+)\]/;
+            $name = $1 if $section eq 'current' && $l =~ m/^(?:name|hostname):\s*(\S+)/;
+            next if $l !~ m/^(\w+):\s*(.*)$/;
+            my ($key, $val) = ($1, $2);
+            for my $st (keys %stores) {
+                while ($val =~ m/(?:^|[,=\s])(\Q$st\E:vm-\d+-[A-Za-z0-9][A-Za-z0-9_-]*)/g) {
+                    push @{ $refs->{$1} }, {
+                        vmid => $vmid, type => ($type eq 'lxc' ? 'ct' : 'vm'), key => $key,
+                        node => $node, section => $section,
+                    };
+                }
+            }
+        }
+        close($fh);
+        for my $list (values %$refs) {
+            $_->{name} //= $name for grep { $_->{vmid} == $vmid } @$list;
+        }
+    }
+    return $refs;
+}
+
+if ($cmd eq 'list') {
+    my @rows;
+    for my $id (pick_stores()) {
+        my $s = $stores{$id};
+        my $r = {
+            storage => $id,
+            backend => $P->can('backend')->($s, $id),
+            address => $s->{'sw-address'},
+            pool => $s->{'sw-pool'},
+            prefix => $P->can('sw_prefix')->($s),
+            mapping => $s->{'sw-hostcluster'} ? "hostcluster:$s->{'sw-hostcluster'}" : "hosts:$s->{'sw-hosts'}",
+            enabled => $s->{disable} ? 0 : 1,
+        };
+        my $sys = eval { $P->can('system_info')->($s, $id) };
+        if ($sys) {
+            $r->{system} = $sys->{name};
+            $r->{code_level} = (split(/\s/, $sys->{code_level} // ''))[0];
+            my ($total, $free, $used, $active) = $P->status($id, $s);
+            @$r{qw(total free used)} = ($total, $free, $used);
+            $r->{state} = $active ? 'online' : 'offline';
+        } else {
+            $r->{state} = 'unreachable';
+            ($r->{error} = $@) =~ s/\s+$//;
+        }
+        if (!$json) { $r->{$_} = human($r->{$_}) for grep { defined $r->{$_} } qw(total free used); }
+        push @rows, $r;
+    }
+    out(\@rows, [qw(storage state backend address system code_level pool prefix mapping total free)]);
+
+} elsif ($cmd eq 'info') {
+    my ($id) = pick_stores(shift(@ARGV) // die "usage: pve-ibm-storage info <storeid>\n");
+    my $s = $stores{$id};
+    my $sys = $P->can('system_info')->($s, $id, 1);
+    my $pool = $P->can('sw_show')->($s, $id, 'lsmdiskgrp', [bytes => undef], $s->{'sw-pool'});
+    my $cl = $sys->{code_level};
+    my $ge = $P->can('code_ge');
+    my $info = {
+        storage => $id,
+        backend => $P->can('backend')->($s, $id),
+        system => $sys,
+        pool => { map { $_ => $pool->{$_} } grep { exists $pool->{$_} }
+            qw(name status capacity free_capacity virtual_capacity used_capacity real_capacity
+               overallocation parent_mdisk_grp_name type easy_tier) },
+        capabilities => {
+            flashcopy => JSON::true,
+            host_cluster => $ge->($cl, '7.7.1') ? JSON::true : JSON::false,
+            child_pool => $ge->($cl, '7.4.0') ? JSON::true : JSON::false,
+            volume_group => $ge->($cl, '8.3.0') ? JSON::true : JSON::false,
+            rest_api => $ge->($cl, '8.1.3') ? JSON::true : JSON::false,
+            volume_group_snapshot => $ge->($cl, '8.5.1') ? JSON::true : JSON::false,
+            policy_based_replication => $ge->($cl, '8.5.2') ? JSON::true : JSON::false,
+        },
+    };
+    if ($json) {
+        print JSON->new->canonical->pretty->encode($info);
+    } else {
+        printf "%-14s %s\n", 'storage', $id;
+        printf "%-14s %s\n", 'backend', $info->{backend};
+        printf "%-14s %s (%s)\n", 'system', $sys->{name}, $sys->{product_name};
+        printf "%-14s %s\n", 'firmware', $cl;
+        printf "%-14s %s  %s free of %s  (%s)\n", 'pool', $pool->{name}, human($pool->{free_capacity}),
+            human($pool->{capacity}), $pool->{type} // '';
+        print "features:\n";
+        for my $k (sort keys %{ $info->{capabilities} }) {
+            printf "  %-26s %s\n", $k, $info->{capabilities}->{$k} ? 'yes' : 'no';
+        }
+    }
+
+} elsif ($cmd eq 'inventory' || $cmd eq 'orphans') {
+    my $refs = config_refs();
+    my @rows;
+    for my $id (pick_stores(shift(@ARGV))) {
+        my $s = $stores{$id};
+        my $p = $P->can('sw_prefix')->($s);
+        my $vds = eval {
+            $P->can('sw_list')->($s, $id, 'lsvdisk', [bytes => undef, filtervalue => "name=$p-vm-*"]);
+        };
+        if (!$vds) { warn "$id: $@"; next; }
+        my %snaps;
+        my $maps = eval { $P->can('sw_list')->($s, $id, 'lsfcmap', []) } // [];
+        for my $m (@$maps) {
+            next if !$P->can('is_own_snap_target')->($s, $m->{target_vdisk_name} // '');
+            push @{ $snaps{ $m->{source_vdisk_name} } }, $m;
+        }
+        for my $v (@$vds) {
+            next if $v->{name} =~ m/_s_/;
+            my $volname = substr($v->{name}, length($p) + 1);
+            my $volid = "$id:$volname";
+            my $uid = $v->{vdisk_UID};
+            my $users = $refs->{$volid} // [];
+            my ($cur) = grep { $_->{section} eq 'current' } @$users;
+            $cur //= $users->[0];
+            next if $cmd eq 'orphans' && @$users;
+            push @rows, {
+                storage => $id,
+                vmid => $cur ? $cur->{vmid} : '',
+                guest => $cur ? "$cur->{type}:" . ($cur->{name} // '') : '',
+                node => $cur ? $cur->{node} : '',
+                disk => $cur ? $cur->{key} : ($cmd eq 'orphans' ? 'ORPHAN' : ''),
+                volid => $volid,
+                vdisk => $v->{name},
+                uid => $uid,
+                size => $json ? int($v->{capacity}) : human($v->{capacity}),
+                snapshots => scalar(@{ $snaps{ $v->{name} } // [] }),
+                status => $v->{status},
+                local_device => -b $P->can('uid_to_path')->($uid) ? 'yes' : 'no',
+            };
+        }
+    }
+    @rows = sort { ($a->{vmid} || 0) <=> ($b->{vmid} || 0) || $a->{volid} cmp $b->{volid} } @rows;
+    out(\@rows, [qw(storage vmid guest node disk volid vdisk uid size snapshots status local_device)]);
+
+} elsif ($cmd eq 'stale-paths') {
+    my %known;
+    for my $id (pick_stores()) {
+        my $s = $stores{$id};
+        my $all = eval { $P->can('sw_list')->($s, $id, 'lsvdisk', []) };
+        if (!$all) { die "$id unreachable - cannot decide safely: $@"; }
+        $known{ lc($_->{vdisk_UID}) } = "$id:$_->{name}" for @$all;
+    }
+    my @rows;
+    for my $dm (glob('/sys/block/dm-*')) {
+        my $uuid = PVE::Tools::file_read_firstline("$dm/dm/uuid") // next;
+        next if $uuid !~ m/^mpath-3(6005076[0-9a-f]{25})$/i;
+        my $uid = lc($1);
+        my @slaves = map { (split(m|/|))[-1] } glob("$dm/slaves/*");
+        push @rows, {
+            map => "3$uid", dm => (split(m|/|, $dm))[-1], paths => join(',', @slaves),
+            volume => $known{$uid} // '', state => $known{$uid} ? 'ok' : 'STALE',
+        };
+    }
+    out(\@rows, [qw(map dm paths volume state)]);
+
+} else {
+    print <<'EOF';
+usage: pve-ibm-storage [--json] <command>
+  list                 registered storwize storages and state
+  info <storeid>       system, pool and features supported by the firmware
+  inventory [storeid]  VM/CT <-> volume on the array
+  orphans [storeid]    volumes with the prefix that no VM/CT owns
+  stale-paths          local IBM multipath maps with no volume on any array
+adding a new storage: see README (setup-ssh-key.sh + pvesm add storwize)
+EOF
+}

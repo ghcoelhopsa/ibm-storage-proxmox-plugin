@@ -1,0 +1,15 @@
+# credentials and host keys never belong in the repository
+*.key
+*_id_rsa*
+*.pw
+known_hosts
+
+# local output
+collect-*.txt
+__pycache__/
+*.pyc
+*.swp
+*~
+
+# Carbon CSS and IBM Plex fonts, downloaded by panel/deploy.sh
+panel/vendor-cache/

@@ -1,0 +1,28 @@
+# /etc/pve/storage.cfg - example storages of the storwize plugin
+# Each array (or pool) is ONE entry. Several entries = several storages.
+# Credentials are NEVER stored here: SSH key in /etc/pve/priv/storwize/<id>_id_rsa,
+# REST password in /etc/pve/priv/storwize/<id>.pw (written by pvesm add --password).
+
+# Storwize V7000 Gen1, firmware 7.8.1 - SSH backend (no REST API)
+storwize: v7k
+	sw-address 192.168.15.20
+	sw-api ssh
+	sw-user pveplugin
+	sw-pool PVE_Pool
+	sw-hosts Proxmox
+	content images
+	shared 1
+
+# FlashSystem 8.x - REST backend (port 7443), host cluster, volume group for PBR
+#storwize: fs5200
+#	sw-address 10.0.0.50
+#	sw-api rest
+#	sw-user pveplugin
+#	sw-fingerprint AA:BB:...   (pinned automatically by pvesm add)
+#	sw-pool Pool_SSD
+#	sw-snappool Pool_Snap
+#	sw-hostcluster pve-cluster
+#	sw-volumegroup proxmox_vg
+#	sw-prefix pvefs
+#	content images,rootdir
+#	shared 1
