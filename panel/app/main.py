@@ -5,6 +5,7 @@ Proxmox API with the user's own ticket; array data comes over SSH with the
 credential the panel keeps for each storage.
 """
 import base64
+import hashlib
 import datetime
 import json
 import os
@@ -2431,15 +2432,30 @@ async def security_headers(request: Request, call_next):
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+_VERSIONS = {}
+
+
+def static_version(name):
+    """Short hash of the file content. The file date is not enough: every container made from the
+    same image has the same dates, and a browser that saw another panel at the same address would
+    take its copy as current."""
+    p = os.path.join(STATIC, name)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return "0"
+    key = (name, st.st_mtime_ns, st.st_size)
+    if key not in _VERSIONS:
+        with open(p, "rb") as f:
+            _VERSIONS[key] = hashlib.sha256(f.read()).hexdigest()[:12]
+    return _VERSIONS[key]
+
+
 def index_html():
     """index.html with each file's version in the address (?v=...): after every release the browser
     fetches the new files in full, without trying to reuse or resume old copies."""
     def ver(m):
-        try:
-            v = int(os.path.getmtime(os.path.join(STATIC, m.group(2))))
-        except OSError:
-            v = 0
-        return f'{m.group(1)}="/static/{m.group(2)}?v={v}"'
+        return f'{m.group(1)}="/static/{m.group(2)}?v={static_version(m.group(2))}"'
     html = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
     return re.sub(r'(href|src)="/static/([^"?]+)"', ver, html)
 

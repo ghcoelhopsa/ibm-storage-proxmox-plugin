@@ -1720,19 +1720,36 @@ async function schedFlow(B, s, done) {
         ${B.vms.map(v => checkbox("sc-v-" + v.vmid, `<b>${v.vmid}</b> <span data-noi18n>${esc(v.name || "")}</span> <span class="helper" data-noi18n>${esc(v.node || "")}</span>`, sel.has(v.vmid), `data-vm="${v.vmid}"`)).join("") || `<span class="muted">No VMs.</span>`}</div>
         <div class="cds--form__helper-text">VMs run one at a time. Only VMs with disks on plugin storage use the snapshot; the others fall back to the regular backup.</div></div>
       ${checkbox("sc-f", "If the snapshot backup fails, run the regular Proxmox backup", s ? s.fallback : true)}
-      ${checkbox("sc-p", "Mark the backup as <b>protected</b> on the PBS", s ? !!s.protected : false)}
+      ${checkbox("sc-pr", "Mark the backup as <b>protected</b> on the PBS", s ? !!s.protected : false)}
       <p class="helper">Prune jobs and a plain remove skip protected backups; they stay until someone clears the mark in Proxmox, so they keep using space. The mark guards against mistakes, not against someone with rights on the datastore.</p></div>`,
     buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Save", kind: "primary" }],
     onButton: async (id, root) => {
       if (id !== "go") return false;
       const body = { id: s ? s.id : undefined, name: $("#sc-n").value.trim(), pbs: $("#sc-p").value, time: $("#sc-t").value, enabled: s ? s.enabled : true,
-        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), fallback: $("#sc-f").checked, protected: $("#sc-p").checked };
+        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), fallback: $("#sc-f").checked, protected: $("#sc-pr").checked };
       try { const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/schedules", body));
         const bad = r.nodes.filter(n => !n.ok); toast(bad.length ? "warn" : "ok", "Schedule saved", bad.length ? bad.map(n => `${n.node}: ${n.error}`).join(" · ") : ""); done(); return false; }
       catch (e) { toast("err", "Could not save", e.message); return true; }
     } });
 }
 
-buildNav();
-setTitle();
-route();
+/* A stylesheet that did not arrive (dropped connection, bad cached copy) leaves the menu and the
+   pages without their layout. Before drawing anything, check that both sheets applied and fetch a
+   missing one again, past the browser cache, in its original place so the rule order holds. */
+async function ensureStyles() {
+  const sheets = [["--cds-background", "vendor/carbon.min.css"], ["--sw-shell", "app.css"]];
+  for (let i = 0; i < 3; i++) {
+    const css = getComputedStyle(document.documentElement);
+    const miss = sheets.filter(([v]) => !css.getPropertyValue(v).trim());
+    if (!miss.length) return;
+    await Promise.all(miss.map(([, f]) => new Promise(res => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet"; l.href = `/static/${f}?r=${Date.now()}${i}`;
+      l.onload = l.onerror = res; setTimeout(res, 10000);
+      const old = document.querySelector(`link[href^="/static/${f}"]`);
+      if (old) old.after(l); else document.head.appendChild(l);
+    })));
+  }
+}
+
+ensureStyles().finally(() => { buildNav(); setTitle(); route(); });

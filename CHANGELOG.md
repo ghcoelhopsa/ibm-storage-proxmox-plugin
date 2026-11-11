@@ -18,6 +18,12 @@
 - Panel version follows the plugin: 0.3.2. The appliance image carries the same number.
 - Fix: the first opening of an unconfigured panel bounced between the sign-in and the initial setup
   pages, which could leave the page without its styles.
+- Fix: the menu and pages could show without their layout when a stylesheet did not arrive. The
+  panel now checks that both stylesheets applied before drawing and fetches a missing one again.
+  File versions in the page address come from the file content, not its date, so a browser never
+  reuses a copy from another panel at the same address.
+- Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
+  PBS selector).
 - Fix: a panel credential generated but not applied yet survives a restart of the panel and is
   offered again instead of being replaced.
 
