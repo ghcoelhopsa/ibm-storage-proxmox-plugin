@@ -24,6 +24,13 @@
   reuses a copy from another panel at the same address.
 - Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
   PBS selector).
+- Fix (plugin): replacing the array key through the Proxmox API failed with "sw-address not set" on
+  Proxmox VE 9, which hands the update hook only the changed properties. The plugin now uses the
+  full update hook.
+- Fix (plugin): a new private key is written together with its public key file; ssh offered the
+  old public key from the file next to it and the array refused the new key.
+- Fix (plugin): the shared SSH connection to the array is tied to the key file, so a replaced key
+  opens a new connection instead of reusing one the array no longer accepts.
 - A new or reinstalled panel takes the array key of each storage from Proxmox when a node is
   authorized or the storage is opened, so the key on the array does not change. Generating a new
   key shows a warning: the plugin cannot reach the array until the key is applied.

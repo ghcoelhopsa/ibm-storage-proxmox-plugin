@@ -383,6 +383,10 @@ sub ssh_cmd {
     my ($addr) = ($scfg->{'sw-address'} // '') =~ m/^([A-Za-z0-9_.:\[\]-]+)$/
         or die "storwize: sw-address not set or invalid\n";
     my ($port) = ($scfg->{'sw-port'} // 22) =~ m/^(\d+)$/ or die "storwize: invalid sw-port\n";
+    # The array checks the key on every command, also inside an open shared connection, and
+    # pvestatd keeps that connection busy. The key file's change time in the socket name makes a
+    # replaced key (on any node of the cluster) open a new connection; the old one ends by itself.
+    my ($kt) = ((stat($key))[9] // 0) =~ m/^(\d+)$/;
     return [
         '/usr/bin/ssh',
         '-i', $key,
@@ -394,7 +398,7 @@ sub ssh_cmd {
         '-o', 'ServerAliveInterval=15',
         '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa',
         '-o', 'ControlMaster=auto',
-        '-o', "ControlPath=$rdir/ssh-%C",
+        '-o', "ControlPath=$rdir/ssh-$kt-%C",
         '-o', 'ControlPersist=60',
         '-o', 'LogLevel=ERROR',
         "$user\@$addr",
@@ -1004,6 +1008,15 @@ sub store_ssh_material {
         ($pem) = $pem =~ m/^(.*)$/s;
         file_set_contents($file, $pem, 0600);
         push @written, $file;
+        # ssh offers the key from the .pub file next to it: an old one there gets the new key refused
+        my $pub = '';
+        eval { run_command(['/usr/bin/ssh-keygen', '-y', '-f', $file], outfunc => sub { $pub .= "$_[0]\n" }, timeout => 10) };
+        if ($pub =~ m/^((?:ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp\d+) [A-Za-z0-9+\/=]+)/) {
+            file_set_contents("$file.pub", "$1 pveplugin\@$id\n", 0600);
+            push @written, "$file.pub";
+        } else {
+            unlink "$file.pub";
+        }
     }
     if (defined(my $b64 = $param{'sw-sshhostkey'})) {
         my $addr = $scfg->{'sw-address'} // die "storwize: sw-address not set\n";
@@ -1049,6 +1062,14 @@ sub on_add_hook {
         die $err;
     }
     return undef;
+}
+
+# Proxmox VE 9 (storage API 13+) calls this one, with the current configuration apart from the
+# properties being changed; the old hook received only the changed properties (no sw-address).
+sub on_update_hook_full {
+    my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
+    my %cfg = (%$scfg, %$update);
+    return $class->on_update_hook($storeid, \%cfg, %{ $sensitive // {} });
 }
 
 sub on_update_hook {
