@@ -635,7 +635,8 @@ async function pageStorage(id, tab = "resumo") {
   }
   const c = d.config, a = d.array, pfx = (c["sw-prefix"] || "pve") + "-";
   const active = d.status.some(x => x.active);
-  const managed = a.ok ? a.vdisks.filter(v => v.name.startsWith(pfx)) : [];
+  const isTrash = v => v.name.startsWith(pfx + "trash");
+  const managed = a.ok ? a.vdisks.filter(v => v.name.startsWith(pfx) && !isTrash(v)) : [];
   const head = pageHeader({
     crumbs: [["Storages", "#/storages"], [id]],
     title: `${icon("data--base", 24)} ${esc(id)} ${a.ok ? (active ? status("ok", "Active") : status("err", "Inactive")) : status("warn", "No access from the panel")}`,
@@ -652,7 +653,7 @@ async function pageStorage(id, tab = "resumo") {
       catch (err) { toast("err", "Could not import", err.message); }
     }); bindStorageOvf(id, d); return;
   }
-  const T = [["resumo", "Summary"], ["volumes", "Volumes", a.vdisks.length], ["flashcopy", "FlashCopy", a.fcmaps.length], ["hosts", "Hosts", a.hosts.length], ["fc", "Fibre Channel"], ["eventos", "Alerts", a.events.length], ["config", "Configuration"]];
+  const T = [["resumo", "Summary"], ["volumes", "Volumes", a.vdisks.length], ["flashcopy", "FlashCopy", a.fcmaps.length], ["hosts", "Hosts", a.hosts.length], ["fc", "Fibre Channel"], ["eventos", "Alerts", a.events.length], ["lixeira", "Trash", a.vdisks.filter(isTrash).length], ["config", "Configuration"]];
   if (a.capabilities.vg_snapshot) T.splice(3, 0, ["protecao", "Protection"]);
   main.innerHTML = `<div class="page">${head}${tabs(T, tab)}<div id="tab"></div></div>`;
   $$("[data-tab]").forEach(b => b.onclick = () => location.hash = `#/storage/${encodeURIComponent(id)}/${b.dataset.tab}`);
@@ -689,7 +690,7 @@ async function pageStorage(id, tab = "resumo") {
     mount(el, dataTable({
       columns: [
         { t: "Name", key: "name", render: v => `<span class="mono">${esc(v.name)}</span>` },
-        { t: "Type", text: v => v.name.startsWith(pfx) ? (v.name.includes("_s_") ? "snapshot" : "proxmox") : "external", render: v => v.name.startsWith(pfx) ? (v.name.includes("_s_") ? tag("Snapshot", "purple") : tag("Proxmox", "info")) : tag("External", "neutral", "not managed by Proxmox") },
+        { t: "Type", text: v => isTrash(v) ? "trash" : v.name.startsWith(pfx) ? (v.name.includes("_s_") ? "snapshot" : "proxmox") : "external", render: v => isTrash(v) ? tag("Trash", "warm-gray") : v.name.startsWith(pfx) ? (v.name.includes("_s_") ? tag("Snapshot", "purple") : tag("Proxmox", "info")) : tag("External", "neutral", "not managed by Proxmox") },
         { t: "State", key: "status", render: v => status(v.status === "online" ? "ok" : "err", v.status) },
         { t: "Pool", key: "mdisk_grp_name" },
         { t: "Capacity", num: 1, sortVal: v => +v.capacity, render: v => bytes(v.capacity) },
@@ -729,6 +730,8 @@ async function pageStorage(id, tab = "resumo") {
         { t: "Severity", render: e => e.error_code ? status("err", "Error") : status("warn", "Warning") },
       ], rows: a.events, title: "Open alerts", desc: "Handle the alert and mark it as fixed in the array GUI (Monitoring › Events).",
     }));
+  } else if (tab === "lixeira") {
+    await trashTab(el, id);
   } else if (tab === "config") {
     const keys = Object.keys(c).filter(k => k !== "digest").sort();
     el.innerHTML = `<div class="g g-2"><section class="tile"><h3 class="tile-title">Definition in Proxmox <span class="helper">storage.cfg</span></h3>${sl(keys.map(k => [k, `<span class="mono">${esc(c[k])}</span>`]))}</section>
@@ -738,6 +741,59 @@ async function pageStorage(id, tab = "resumo") {
     $("#cred")?.addEventListener("click", () => credentialFlow(id));
   }
 }
+/* ---- Trash: disks removed in Proxmox, kept unmapped on the array ---------- */
+async function trashTab(el, id) {
+  const sid = encodeURIComponent(id);
+  const r = await api("GET", `/storages/${sid}/trash`);
+  const keep = r.days > 0
+    ? `Disks removed in Proxmox stay here for <b>${r.days} day(s)</b>, unmapped from the hosts, and are then deleted from the array. They still use space in the pool.`
+    : `The trash is off: disks removed in Proxmox are deleted from the array at once.`;
+  const head = `<div class="page-actions" style="display:flex;gap:1rem;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:1rem"><p class="muted" style="max-width:48rem;margin:0">${keep}</p>${ME.admin ? btn("Retention", "tertiary", 'id="tr-days"', "time") : ""}</div>`;
+  el.innerHTML = head + `<div id="tr-t"></div>`;
+  mount($("#tr-t", el), dataTable({
+    columns: [
+      { t: "Disk", key: "volname", render: x => `<span class="mono">${esc(x.volname)}</span><div class="helper mono">${esc(x.name)}</div>` },
+      { t: "VM/CT", num: 1, key: "vmid", render: x => `${x.vmid}${x.guest ? ` <span class="helper">${esc(x.guest)}</span>` : ` <span class="helper">does not exist</span>`}` },
+      { t: "Size", num: 1, sortVal: x => x.size, render: x => bytes(x.size) },
+      { t: "Removed", sortVal: x => x.deleted, render: x => esc(dt(x.deleted)) },
+      { t: "Deleted on", sortVal: x => x.expires, render: x => x.expires * 1000 <= Date.now() ? status("warn", "next check") : esc(dt(x.expires)) },
+      ...(ME.admin ? [{ t: "", render: x => `<div style="display:flex;gap:.5rem;justify-content:flex-end">${btn("Restore", "tertiary", `data-trr="${esc(x.name)}" data-vm="${x.vmid}"`, "undo", "sm")}${btn("Delete now", "danger--ghost", `data-trd="${esc(x.name)}"`, "trash-can", "sm")}</div>` }] : []),
+    ], rows: r.items, empty: "The trash is empty.",
+  }));
+  const reload = () => { main.dataset.route = ""; route(); };
+  el.onclick = async e => {
+    const rs = e.target.closest("[data-trr]"), dl = e.target.closest("[data-trd]");
+    if (e.target.closest("#tr-days")) {
+      await modal({ label: id, title: "Trash retention", size: "sm",
+        body: `${textInput("tr-n", "Days to keep removed disks", `type="number" min="0" max="3650" value="${r.days}"`, "0 turns the trash off: removed disks are deleted at once. A shorter value also applies to the disks already in the trash, at the next hourly check.")}`,
+        buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Save", kind: "primary" }],
+        onButton: async (b, root) => {
+          if (b !== "go") return false;
+          try { await busy($("[data-b=go]", root), () => api("POST", `/storages/${sid}/trash/days`, { days: +$("#tr-n").value })); toast("ok", "Retention saved", id); reload(); return false; }
+          catch (err) { toast("err", "Could not save", err.message); return true; }
+        } });
+    } else if (rs) {
+      const name = rs.dataset.trr;
+      await modal({ label: id, title: "Restore disk", size: "sm",
+        body: `<p>The disk is mapped to the hosts again and shows up in the VM/CT as an <b>unused disk</b>: attach it in Proxmox under Hardware › Unused Disk › Edit.</p>
+          ${textInput("tr-vm", "VM/CT", `type="number" min="100" value="${esc(rs.dataset.vm)}"`, "The original VMID by default. With another VMID the disk takes the next free disk name of that VM/CT.")}`,
+        buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Restore", kind: "primary" }],
+        onButton: async (b, root) => {
+          if (b !== "go") return false;
+          try { const o = await busy($("[data-b=go]", root), () => api("POST", `/storages/${sid}/trash/restore`, { name, vmid: $("#tr-vm").value }));
+            toast("ok", "Disk restored", `${o.volid || ""} · ${o.rescan || ""}`); reload(); return false; }
+          catch (err) { toast("err", "Could not restore", err.message); return true; }
+        } });
+    } else if (dl) {
+      const name = dl.dataset.trd;
+      if (!await confirmDialog({ label: id, title: "Delete this disk now?", danger: true, ok: "Delete",
+        body: `<p>The volume <span class="mono">${esc(name)}</span> is deleted from the array. This cannot be undone.</p>` })) return;
+      try { await api("POST", `/storages/${sid}/trash/delete`, { name }); toast("ok", "Disk deleted", name); reload(); }
+      catch (err) { toast("err", "Could not delete", err.message); }
+    }
+  };
+}
+
 /* ---- Fibre Channel: light (SFP DDM) and errors on both sides -------------- */
 function optKind(v, sfp, dir) {
   if (v == null || !sfp || !sfp.ddm) return "neutral";

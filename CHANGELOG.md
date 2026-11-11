@@ -24,6 +24,10 @@
   reuses a copy from another panel at the same address.
 - Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
   PBS selector).
+- Trash: a disk removed in Proxmox (including the disks of a destroyed VM) is unmapped and renamed
+  `<prefix>-trash<time>-<volume>` instead of deleted, and kept for `sw-trash-days` (default 7).
+  The panel has a Trash tab with restore and delete; the CLI has `trash`, `trash-restore`,
+  `trash-delete` and `trash-purge`.
 - Fix (plugin): replacing the array key through the Proxmox API failed with "sw-address not set" on
   Proxmox VE 9, which hands the update hook only the changed properties. The plugin now uses the
   full update hook.

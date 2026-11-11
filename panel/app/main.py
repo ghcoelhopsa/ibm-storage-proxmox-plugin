@@ -1472,6 +1472,133 @@ def cred_apply(storeid: str, s=Depends(admin)):
 
 
 # ---------------------------------------------------------------------------
+# Trash: disks removed in Proxmox stay on the array, unmapped and renamed
+# <prefix>-trash<epoch>-<volume>, for sw-trash-days (the plugin deletes them afterwards)
+# ---------------------------------------------------------------------------
+
+TRASH_NAME_RE = re.compile(r"^vm-\d+-[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def trash_days(c):
+    try:
+        return int(c.get("sw-trash-days", 7))
+    except (TypeError, ValueError):
+        return 7
+
+
+def trash_items(c, vdisks):
+    m = re.compile(r"^" + re.escape(c.get("sw-prefix", "pve")) + r"-trash(\d{9,11})-(vm-(\d+)-[A-Za-z0-9][A-Za-z0-9_-]*)$")
+    keep = trash_days(c) * 86400
+    out = []
+    for v in vdisks:
+        r = m.match(v.get("name", ""))
+        if not r:
+            continue
+        t = int(r.group(1))
+        out.append({"name": v["name"], "volname": r.group(2), "vmid": int(r.group(3)), "deleted": t,
+                    "expires": t + keep, "size": int(v.get("capacity") or 0), "uid": v.get("vdisk_UID")})
+    return sorted(out, key=lambda x: x["deleted"])
+
+
+def trash_node(s, vmid=None):
+    """The node that holds the guest (so the plugin can rescan it), else any node the panel reaches."""
+    nodes = [n for n in (pcall(s, "GET", "/cluster/status") or []) if n.get("type") == "node" and n.get("online")]
+    if vmid is not None:
+        for r in pcall(s, "GET", "/cluster/resources", type="vm") or []:
+            if r.get("vmid") == vmid:
+                nodes.sort(key=lambda n: n.get("name") != r.get("node"))
+                break
+    for n in nodes:
+        try:
+            if nodessh.run(n.get("ip"), "test -x /usr/local/sbin/pve-ibm-storage", 15)[0] == 0:
+                return n
+        except Exception:
+            continue
+    err(409, "no node with the plugin tools reachable by the panel - authorize and prepare one under Proxmox nodes")
+
+
+def trash_cli(s, args, vmid=None, timeout=300):
+    n = trash_node(s, vmid)
+    rc, o, e = nodessh.run(n.get("ip"), "/usr/local/sbin/pve-ibm-storage --json " + " ".join(sh(a) for a in args), timeout)
+    if rc != 0:
+        err(502, (e or o).strip().splitlines()[-1] if (e or o).strip() else f"rc={rc}")
+    try:
+        return json.loads(o)
+    except ValueError:
+        return {}
+
+
+@app.get("/api/storages/{storeid}/trash")
+def trash_list(storeid: str, s=Depends(session)):
+    c = storage_cfg(s, storeid)
+    a = array_snapshot(c, ttl=10)
+    if not a.get("ok"):
+        err(502, a.get("error", "array unreachable"))
+    vms = {r.get("vmid"): r.get("name") for r in pcall(s, "GET", "/cluster/resources", type="vm") or []}
+    items = trash_items(c, a["vdisks"])
+    for t in items:
+        t["guest"] = vms.get(t["vmid"])
+    return {"days": trash_days(c), "items": items}
+
+
+def trash_check(c, name):
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,62}$", name):
+        err(400, "invalid volume name")
+    try:
+        rows = array_for(c).ls("lsvdisk", [("bytes", None), ("filtervalue", f"name={name}")])
+    except ArrayError as e:
+        err(502, str(e))
+    if not trash_items(c, rows):
+        err(404, "this volume is not in the trash any more")
+
+
+@app.post("/api/storages/{storeid}/trash/restore")
+async def trash_restore(storeid: str, request: Request, s=Depends(admin)):
+    b = await request.json()
+    c = storage_cfg(s, storeid)
+    name = str(b.get("name", ""))
+    trash_check(c, name)
+    vmid = b.get("vmid")
+    args = ["trash-restore", storeid, name]
+    if vmid not in (None, ""):
+        if not re.match(r"^\d{1,9}$", str(vmid)) or int(vmid) < 100:
+            err(400, "invalid VMID")
+        vmid = int(vmid)
+        args.append(str(vmid))
+    else:
+        vmid = int(name.split("-vm-", 1)[1].split("-", 1)[0])
+    r = trash_cli(s, args, vmid)
+    drop_cache()
+    return r
+
+
+@app.post("/api/storages/{storeid}/trash/delete")
+async def trash_delete(storeid: str, request: Request, s=Depends(admin)):
+    b = await request.json()
+    c = storage_cfg(s, storeid)
+    name = str(b.get("name", ""))
+    trash_check(c, name)
+    r = trash_cli(s, ["trash-delete", storeid, name])
+    drop_cache()
+    return r
+
+
+@app.post("/api/storages/{storeid}/trash/days")
+async def trash_set_days(storeid: str, request: Request, s=Depends(admin)):
+    b = await request.json()
+    storage_cfg(s, storeid)
+    try:
+        d = int(b.get("days"))
+    except (TypeError, ValueError):
+        err(400, "days must be a whole number")
+    if not 0 <= d <= 3650:
+        err(400, "days must be between 0 and 3650")
+    pcall(s, "PUT", f"/storage/{storeid}", **{"sw-trash-days": d})
+    drop_cache()
+    return {"days": d}
+
+
+# ---------------------------------------------------------------------------
 # Proxmox nodes: preparation without touching config files by hand
 # ---------------------------------------------------------------------------
 

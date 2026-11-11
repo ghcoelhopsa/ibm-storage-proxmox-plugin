@@ -7,6 +7,11 @@
 #   pve-ibm-storage inventory [storeid]  VM/CT <-> volume (UID, size, snapshots)
 #   pve-ibm-storage orphans [storeid]    volumes with the prefix that no VM/CT uses
 #   pve-ibm-storage stale-paths          local multipath maps with no volume on any array
+#   pve-ibm-storage trash [storeid]      removed disks kept on the array (sw-trash-days)
+#   pve-ibm-storage trash-restore <storeid> <volume> [vmid]
+#                                        put a disk back (as an unused disk of the VM/CT)
+#   pve-ibm-storage trash-delete <storeid> <volume>   delete it now
+#   pve-ibm-storage trash-purge [storeid]             delete what is past the retention
 #
 # Global option: --json (output for the web panel)
 
@@ -14,7 +19,10 @@ use strict;
 use warnings;
 
 use JSON;
+use PVE::Cluster;
+use PVE::INotify;
 use PVE::Storage;
+use PVE::Tools;
 use PVE::Storage::Custom::StorwizePlugin;
 
 my $P = 'PVE::Storage::Custom::StorwizePlugin';
@@ -206,6 +214,66 @@ if ($cmd eq 'list') {
     @rows = sort { ($a->{vmid} || 0) <=> ($b->{vmid} || 0) || $a->{volid} cmp $b->{volid} } @rows;
     out(\@rows, [qw(storage vmid guest node disk volid vdisk uid size snapshots status local_device)]);
 
+} elsif ($cmd eq 'trash') {
+    my @rows;
+    for my $id (pick_stores(shift(@ARGV))) {
+        my $s = $stores{$id};
+        my $list = eval { $P->can('trash_list')->($s, $id) };
+        if (!$list) { warn "$id: $@"; next; }
+        for my $t (@$list) {
+            push @rows, {
+                storage => $id, volume => $t->{name}, volid => "$id:$t->{volname}", vmid => $t->{vmid},
+                size => $json ? $t->{size} : human($t->{size}), uid => $t->{uid},
+                deleted => $json ? $t->{deleted} : scalar(localtime($t->{deleted})),
+                expires => $json ? $t->{expires} : scalar(localtime($t->{expires})),
+            };
+        }
+    }
+    out(\@rows, [qw(storage vmid volid volume size deleted expires)]);
+
+} elsif ($cmd eq 'trash-restore') {
+    my ($id, $name, $vmid) = @ARGV;
+    die "usage: pve-ibm-storage trash-restore <storeid> <volume> [vmid]\n" if !defined($name);
+    my ($sid) = pick_stores($id);
+    my $s = $stores{$sid};
+    my $volid = $P->cluster_lock_storage($sid, $s->{shared}, undef, sub {
+        return $P->trash_restore($s, $sid, $name, $vmid);
+    });
+    my ($owner) = $volid =~ m/:vm-(\d+)-/;
+    # the guest sees it as an unused disk after a rescan on the node that holds it
+    my $vmlist = PVE::Cluster::get_vmlist() // {};
+    my $g = $vmlist->{ids}->{$owner};
+    my $rescan = 'no guest with this VMID';
+    if ($g && $g->{node} eq PVE::INotify::nodename()) {
+        my @c = $g->{type} eq 'lxc' ? ('/usr/sbin/pct', 'rescan', '--vmid', $owner)
+            : ('/usr/sbin/qm', 'disk', 'rescan', '--vmid', $owner);
+        eval { PVE::Tools::run_command(\@c, outfunc => sub { }, errfunc => sub { }) };
+        $rescan = $@ ? "rescan failed: $@" : 'added as an unused disk';
+    } elsif ($g) {
+        $rescan = "run 'qm disk rescan --vmid $owner' on node $g->{node}";
+    }
+    if ($json) {
+        print JSON->new->canonical->encode({ volid => $volid, vmid => int($owner), rescan => $rescan }), "\n";
+    } else {
+        print "$volid restored ($rescan)\n";
+    }
+
+} elsif ($cmd eq 'trash-delete') {
+    my ($id, $name) = @ARGV;
+    die "usage: pve-ibm-storage trash-delete <storeid> <volume>\n" if !defined($name);
+    my ($sid) = pick_stores($id);
+    $P->can('trash_delete')->($stores{$sid}, $sid, $name);
+    print $json ? JSON->new->encode({ deleted => $name }) . "\n" : "$name deleted\n";
+
+} elsif ($cmd eq 'trash-purge') {
+    my @done;
+    for my $id (pick_stores(shift(@ARGV))) {
+        my $d = eval { $P->can('trash_purge')->($stores{$id}, $id) };
+        if (!$d) { warn "$id: $@"; next; }
+        push @done, @$d;
+    }
+    print $json ? JSON->new->encode({ deleted => \@done }) . "\n" : join("", map { "$_ deleted\n" } @done);
+
 } elsif ($cmd eq 'stale-paths') {
     my %known;
     for my $id (pick_stores()) {
@@ -235,6 +303,10 @@ usage: pve-ibm-storage [--json] <command>
   inventory [storeid]  VM/CT <-> volume on the array
   orphans [storeid]    volumes with the prefix that no VM/CT owns
   stale-paths          local IBM multipath maps with no volume on any array
+  trash [storeid]      removed disks kept on the array (sw-trash-days, default 7)
+  trash-restore <storeid> <volume> [vmid]   put a disk back as an unused disk of the VM/CT
+  trash-delete <storeid> <volume>           delete a disk from the trash now
+  trash-purge [storeid]                     delete what is past the retention
 adding a new storage: see README (setup-ssh-key.sh + pvesm add storwize)
 EOF
 }

@@ -206,6 +206,7 @@ pvesm add flashsystem fs5200 --sw-address 10.0.0.50 --sw-user pveplugin --sw-api
 | `sw-transport` | `auto` | `fc`, `iscsi`, `nvme-tcp` or `auto` |
 | `sw-portals` | none | NVMe/TCP data ports of the array (`IP[:port]`, comma separated) |
 | `sw-consistency` | `1` | Snapshot all disks of a guest at the same instant |
+| `sw-trash-days` | `7` | Days a removed disk stays in the trash before it is deleted; `0` deletes at once |
 | `sw-snapmode` | `flashcopy`, fixed | `flashcopy`, or `volumegroup` on 8.5.1+ (one volume group per guest) |
 | `sw-volumegroup` | none | Volume group that new volumes join (8.3+) |
 | `sw-partition` | none, fixed | Storage partition that owns the volumes and hosts (8.6.1+ / 9.x) |
@@ -215,7 +216,7 @@ pvesm add flashsystem fs5200 --sw-address 10.0.0.50 --sw-user pveplugin --sw-api
 | Proxmox operation | Array commands |
 |---|---|
 | Create disk | `mkvdisk`, mapping to the hosts or host cluster |
-| Remove disk | snapshots oldest first, local device, unmapping, `rmvdisk` |
+| Remove disk | snapshots oldest first, local device, unmapping, then `chvdisk -name` into the trash (or `rmvdisk` with `sw-trash-days 0`) |
 | Snapshot | thin `mkvdisk`, `mkfcmap`, consistency group, `startfcconsistgrp -prep` |
 | Rollback | reverse FlashCopy with `-restore` |
 | Remove snapshot | `stopfcmap`, wait, `rmfcmap`, `rmvdisk` |
@@ -231,8 +232,34 @@ pve-ibm-storage info v7k            # system, pool and supported features
 pve-ibm-storage inventory           # guest <-> volume (UID, size, snapshots, local device)
 pve-ibm-storage orphans             # volumes with the prefix that no guest uses
 pve-ibm-storage stale-paths         # local multipath maps with no volume behind them
+pve-ibm-storage trash               # removed disks still kept on the array
 pve-ibm-storage --json inventory    # the same data as JSON
 ```
+
+### Trash
+
+Proxmox deletes every disk listed in a VM's configuration when the VM is destroyed, attached or
+unused, whatever the options in the dialog. To give a way back, the plugin does not delete a
+removed disk right away: it removes its snapshots, unmaps it from the hosts, and renames it
+`<prefix>-trash<time>-<volume>` (for example `pve-trash1794431000-vm-9997-disk-0`). The disk
+disappears from Proxmox but stays on the array for `sw-trash-days` (7 by default), then the plugin
+deletes it during its hourly check. It keeps using space in the pool meanwhile.
+
+The panel lists it under **Storage › Trash**, with **Restore** and **Delete now**. Restoring maps the
+disk to the hosts again and adds it to the VM/CT as an unused disk; attach it under Hardware ›
+Unused Disk. From the command line:
+
+```bash
+pve-ibm-storage trash v7k
+pve-ibm-storage trash-restore v7k pve-trash1794431000-vm-9997-disk-0        # back to VM 9997
+pve-ibm-storage trash-restore v7k pve-trash1794431000-vm-9997-disk-0 120    # or to VM 120
+pve-ibm-storage trash-delete v7k pve-trash1794431000-vm-9997-disk-0
+pvesm set v7k --sw-trash-days 14     # 0 turns the trash off
+```
+
+Disks in a volume group (8.x volume group snapshots, policy-based replication, storage partitions)
+are still deleted at once. The trash does not replace backups: the snapshots of a removed disk are
+not kept.
 
 ## The web panel
 

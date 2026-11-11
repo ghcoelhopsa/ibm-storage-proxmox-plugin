@@ -157,6 +157,11 @@ sub properties {
                 . " (FlashCopy consistency group).",
             type => 'boolean', default => 1,
         },
+        'sw-trash-days' => {
+            description => "Days a removed disk stays in the trash on the array (unmapped and renamed"
+                . " <prefix>-trash<time>-<volume>) before it is deleted. 0 deletes at once.",
+            type => 'integer', minimum => 0, maximum => 3650, default => 7,
+        },
         'sw-snapmode' => {
             description => "Snapshot engine: flashcopy (every code level) or volumegroup"
                 . " (8.5.1+, one volume group per guest + addsnapshot; EXPERIMENTAL).",
@@ -187,6 +192,7 @@ sub options {
         'sw-thin'        => { optional => 1 },
         'sw-volumegroup' => { optional => 1 },
         'sw-consistency' => { optional => 1 },
+        'sw-trash-days'  => { optional => 1 },
         'sw-snapmode'    => { optional => 1, fixed => 1 },
         'sw-partition'   => { optional => 1, fixed => 1 },
         nodes            => { optional => 1 },
@@ -201,6 +207,103 @@ sub options {
 # ---------------------------------------------------------------------------
 
 sub sw_prefix { my ($scfg) = @_; return $scfg->{'sw-prefix'} // 'pve'; }
+
+# ---------------------------------------------------------------------------
+# Trash: a removed disk is unmapped and renamed <prefix>-trash<epoch>-<volname> instead of being
+# deleted. The name keeps everything needed to restore it; nothing else is stored. The status
+# poll deletes the ones older than sw-trash-days.
+sub trash_days {
+    my ($scfg) = @_;
+    my ($d) = ($scfg->{'sw-trash-days'} // 7) =~ m/^(\d+)$/;
+    return $d // 7;
+}
+
+sub trash_name {
+    my ($scfg, $volname, $time) = @_;
+    my $n = sw_prefix($scfg) . '-trash' . int($time) . "-$volname";
+    return length($n) <= $MAX_NAME ? $n : undef;
+}
+
+sub trash_parse {
+    my ($scfg, $name) = @_;
+    my $p = quotemeta(sw_prefix($scfg));
+    my ($t, $volname) = ($name // '') =~ m/^${p}-trash(\d{9,11})-(vm-\d+-[A-Za-z0-9][A-Za-z0-9_-]*)$/
+        or return undef;
+    my ($owner) = $volname =~ $VOLNAME_RE;
+    return { name => "$name", deleted => int($t), volname => $volname, vmid => int($owner) };
+}
+
+sub trash_list {
+    my ($scfg, $storeid) = @_;
+    my $p = sw_prefix($scfg);
+    my $rows = sw_list($scfg, $storeid, 'lsvdisk', [bytes => undef, filtervalue => "name=$p-trash*"]);
+    my $keep = trash_days($scfg) * 86400;
+    my @res;
+    for my $r (@$rows) {
+        my $t = trash_parse($scfg, $r->{name}) or next;
+        $t->{size} = int($r->{capacity} // 0);
+        $t->{uid} = $r->{vdisk_UID};
+        $t->{expires} = $t->{deleted} + $keep;
+        push @res, $t;
+    }
+    return [sort { $a->{deleted} <=> $b->{deleted} } @res];
+}
+
+sub trash_delete {
+    my ($scfg, $storeid, $name) = @_;
+    my $t = trash_parse($scfg, $name)
+        or die "storwize: '$name' is not a volume in the trash of this storage\n";
+    sw_run($scfg, $storeid, 'rmvdisk', [], $t->{name});
+    unlink run_dir($storeid) . "/status.json";
+    return 1;
+}
+
+# deletes what is past the retention; a volume someone mapped again by hand is refused by
+# rmvdisk and stays
+sub trash_purge {
+    my ($scfg, $storeid) = @_;
+    my @done;
+    my $now = time();
+    for my $t (@{ trash_list($scfg, $storeid) }) {
+        next if $now < $t->{expires};
+        eval { trash_delete($scfg, $storeid, $t->{name}) };
+        if (my $err = $@) {
+            warn "storwize: trash: '$t->{name}' kept: $err";
+            next;
+        }
+        push @done, $t->{name};
+    }
+    return \@done;
+}
+
+# back under its own name (or the next free disk name of $vmid) and mapped to the hosts again
+sub trash_restore {
+    my ($class, $scfg, $storeid, $name, $vmid) = @_;
+    my $t = trash_parse($scfg, $name)
+        or die "storwize: '$name' is not a volume in the trash of this storage\n";
+    vdisk_info($scfg, $storeid, $t->{name}) or die "storwize: '$t->{name}' is not on the array\n";
+    $vmid //= $t->{vmid};
+    ($vmid) = "$vmid" =~ m/^(\d{1,9})$/ or die "storwize: invalid VMID\n";
+
+    my $target = $t->{volname};
+    if ($vmid != $t->{vmid} || vdisk_info($scfg, $storeid, vdisk_name($scfg, $target))) {
+        my %used = map { (split(/:/, $_->{volid}, 2))[1] => 1 }
+            @{ $class->list_images($storeid, $scfg, $vmid) };
+        $target = undef;
+        for my $i (0 .. 999) {
+            next if $used{"vm-$vmid-disk-$i"};
+            $target = "vm-$vmid-disk-$i";
+            last;
+        }
+        die "storwize: no free disk name for VM $vmid\n" if !defined($target);
+    }
+    my $dst = vdisk_name($scfg, $target);
+    sw_run($scfg, $storeid, 'chvdisk', [name => $dst], $t->{name});
+    map_vdisk($scfg, $storeid, $dst);
+    unlink uid_cache_file($storeid, $target);
+    unlink run_dir($storeid) . "/status.json";
+    return "$storeid:$target";
+}
 
 sub run_dir {
     my ($storeid) = @_;
@@ -1159,6 +1262,13 @@ sub status {
         $c = { total => $total, free => $free, used => $total - $free };
         cache_write($cfile, $c);
     }
+    my $stamp = run_dir($storeid) . "/trash-purge";
+    my $last = (stat($stamp))[9] // 0;
+    if (time() - $last >= 3600) {
+        file_set_contents($stamp, time() . "\n", 0600);
+        eval { trash_purge($scfg, $storeid) };
+        warn "storwize: trash: $@" if $@;
+    }
     return ($c->{total}, $c->{free}, $c->{used}, 1);
 }
 
@@ -1287,6 +1397,11 @@ sub free_image {
 
     wait_rollbacks_done($scfg, $storeid, "target_vdisk_name=$vname", "a rollback into '$vname'");
 
+    # volumes in a volume group (8.x replication, volume group snapshots, partitions) are not
+    # moved to the trash yet: they are deleted as before
+    my $trash = trash_days($scfg) > 0 && !($info->{volume_group_name} // '')
+        ? trash_name($scfg, $volname, time()) : undef;
+
     # FlashCopy cascade: remove snapshots oldest first
     my $maps = snapshot_maps($scfg, $storeid, $vname);
     for my $m (sort { ($a->{start_time} // '') cmp ($b->{start_time} // '') } @$maps) {
@@ -1304,7 +1419,13 @@ sub free_image {
         eval { sw_run($scfg, $storeid, 'rmthrottle', [], $tid) };
         warn "storwize: could not remove throttle $tid of '$vname': $@" if $@;
     }
-    sw_run($scfg, $storeid, 'rmvdisk', [], $vname);
+    if ($trash) {
+        sw_run($scfg, $storeid, 'chvdisk', [name => $trash], $vname);
+        print "storwize: '$vname' unmapped and moved to the trash as '$trash';"
+            . " deleted after " . trash_days($scfg) . " day(s)\n";
+    } else {
+        sw_run($scfg, $storeid, 'rmvdisk', [], $vname);
+    }
 
     # one volume group per guest: drop it together with its last volume (it stays while
     # snapshots - e.g. Safeguarded ones - still hang on it)
