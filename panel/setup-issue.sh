@@ -22,7 +22,7 @@ if [ -s $D/config.json ] || [ -s /etc/swpanel/config.json ]; then
     exit 0
 fi
 if [ ! -s $D/setup-code ]; then
-    c=$(tr -dc 'A-HJ-NP-Z2-9' < /dev/urandom | head -c 8)
+    c=$(tr -dc 'A-HJ-NP-Z2-9' < /dev/urandom 2>/dev/null | head -c 8)
     echo "$(echo $c | cut -c1-4)-$(echo $c | cut -c5-8)" > $D/setup-code
     chown swpanel:swpanel $D/setup-code; chmod 600 $D/setup-code
 fi

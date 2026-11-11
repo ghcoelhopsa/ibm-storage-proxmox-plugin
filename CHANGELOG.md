@@ -15,6 +15,12 @@
   "Prepare node" moves the backup state and removes the old command; schedules created before
   have to be created again.
 
+- Panel version follows the plugin: 0.3.2. The appliance image carries the same number.
+- Fix: the first opening of an unconfigured panel bounced between the sign-in and the initial setup
+  pages, which could leave the page without its styles.
+- Fix: a panel credential generated but not applied yet survives a restart of the panel and is
+  offered again instead of being replaced.
+
 ## 0.3.2 (plugin) - 2026-11-11
 - Two storage types in Proxmox with the same code: `storwize` (IBM Storwize and SVC) and `flashsystem`
   (IBM FlashSystem), the latter in `FlashSystemPlugin.pm`. The panel wizard picks one from the model

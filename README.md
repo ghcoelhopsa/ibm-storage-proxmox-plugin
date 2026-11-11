@@ -23,7 +23,7 @@ It has three parts:
 
 | | |
 |---|---|
-| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.0-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.2-beta/ibm-storage-plugin-proxmox-panel-0.3.0-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
+| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.2-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.2-beta/ibm-storage-plugin-proxmox-panel-0.3.2-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
 | **All releases** | [Releases page](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases), with the checksum of each image |
 | **Source** | `git clone https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin.git` |
 | **Runs on** | Proxmox VE 9.x (developed and tested on 9.2) |
@@ -110,8 +110,8 @@ around it.
 on the Proxmox node:
 
 ```bash
-wget https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.2-beta/ibm-storage-plugin-proxmox-panel-0.3.0-beta.tar.zst
-pct restore <ctid> ibm-storage-plugin-proxmox-panel-0.3.0-beta.tar.zst --storage <storage> --unprivileged 1 --unique 1
+wget https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.2-beta/ibm-storage-plugin-proxmox-panel-0.3.2-beta.tar.zst
+pct restore <ctid> ibm-storage-plugin-proxmox-panel-0.3.2-beta.tar.zst --storage <storage> --unprivileged 1 --unique 1
 pct start <ctid>
 pct console <ctid>      # shows the panel address and the installation code
 ```

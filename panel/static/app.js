@@ -120,7 +120,7 @@ async function api(method, path, body) {
   if (body !== undefined) { opt.headers["content-type"] = "application/json"; opt.body = JSON.stringify(body); }
   const r = await fetch("/api" + path, opt);
   let data = null; try { data = await r.json(); } catch (e) { }
-  if (r.status === 401 && path !== "/login") { ME = null; if (!location.hash.startsWith("#/login")) location.hash = "#/login"; throw new Error("Session expired. Sign in again."); }
+  if (r.status === 401 && path !== "/login") { ME = null; if (path !== "/me" && !location.hash.startsWith("#/login")) location.hash = "#/login"; throw new Error("Session expired. Sign in again."); }
   if (!r.ok) { const e = new Error((data && (data.detail || data.error)) || r.statusText); e.data = data; e.status = r.status; throw e; }
   return data;
 }

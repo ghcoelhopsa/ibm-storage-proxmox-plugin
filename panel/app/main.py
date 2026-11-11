@@ -31,7 +31,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.0"
+VERSION = "0.3.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -1399,15 +1399,24 @@ def cred_import(storeid: str, s=Depends(admin)):
 
 # --- give the panel a credential for an existing storage ---------------
 
+def pending_key(storeid):
+    if not STOREID_RE.match(storeid):
+        err(400, "invalid storage")
+    return os.path.join(store.KEY_DIR, f"rekey-{storeid}")
+
+
 @app.post("/api/storages/{storeid}/credential")
 def cred_new(storeid: str, s=Depends(admin)):
     c = storage_cfg(s, storeid)
-    key = os.path.join(store.KEY_DIR, f"rekey-{storeid}")
-    for f in (key, key + ".pub"):
-        if os.path.exists(f):
-            os.unlink(f)
-    subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-b", "4096", "-m", "PEM", "-N", "",
-                    "-C", "pveplugin@storwize-panel", "-f", key], check=True)
+    key = pending_key(storeid)
+    # a key generated in the last day and not applied yet is offered again: it may already be
+    # on the array, and a second one would lock out whoever installed the first
+    if not (os.path.exists(key) and os.path.exists(key + ".pub") and time.time() - os.path.getmtime(key) < 86400):
+        for f in (key, key + ".pub"):
+            if os.path.exists(f):
+                os.unlink(f)
+        subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-b", "4096", "-m", "PEM", "-N", "",
+                        "-C", "pveplugin@ibm-storage-panel", "-f", key], check=True)
     lines, fps = scan_host_keys(c["sw-address"])
     WIZARDS[f"rekey-{storeid}"] = {"created": time.time(), "key": key, "hostkeys": lines}
     return {"pubkey": open(key + ".pub").read().strip(), "fingerprints": fps, "user": c["sw-user"]}
@@ -1416,7 +1425,13 @@ def cred_new(storeid: str, s=Depends(admin)):
 @app.post("/api/storages/{storeid}/credential/apply")
 def cred_apply(storeid: str, s=Depends(admin)):
     c = storage_cfg(s, storeid)
-    w = wizard(f"rekey-{storeid}")
+    w = WIZARDS.get(f"rekey-{storeid}")
+    if not w:
+        # the panel restarted between the two steps: the key is still on disk
+        key = pending_key(storeid)
+        if not os.path.exists(key):
+            err(404, "no pending key - generate the credential again")
+        w = {"key": key, "hostkeys": scan_host_keys(c["sw-address"])[0]}
     fd, kh = tempfile.mkstemp(prefix="kh-", dir=store.DATA_DIR)
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(w["hostkeys"]) + "\n")
