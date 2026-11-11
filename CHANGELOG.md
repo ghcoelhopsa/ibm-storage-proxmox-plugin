@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.3-beta - 2026-11-11
+- Trash: a disk removed in Proxmox (including the disks of a destroyed VM) is unmapped and renamed
+  `<prefix>-trash<time>-<volume>` instead of deleted, and kept for `sw-trash-days` (default 7).
+  The panel has a Trash tab with restore and delete; the CLI has `trash`, `trash-restore`,
+  `trash-delete` and `trash-purge`.
+- Fix: the first opening of an unconfigured panel bounced between the sign-in and the initial setup
+  pages, which could leave the page without its styles.
+- Fix: the menu and pages could show without their layout when a stylesheet did not arrive. The
+  panel now checks that both stylesheets applied before drawing and fetches a missing one again.
+  File versions in the page address come from the file content, not its date, so a browser never
+  reuses a copy from another panel at the same address.
+- Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
+  PBS selector).
+- Fix (plugin): replacing the array key through the Proxmox API failed with "sw-address not set" on
+  Proxmox VE 9, which hands the update hook only the changed properties. The plugin now uses the
+  full update hook.
+- Fix (plugin): a new private key is written together with its public key file; ssh offered the
+  old public key from the file next to it and the array refused the new key.
+- Fix (plugin): the shared SSH connection to the array is tied to the key file, so a replaced key
+  opens a new connection instead of reusing one the array no longer accepts.
+- A new or reinstalled panel takes the array key of each storage from Proxmox when a node is
+  authorized or the storage is opened, so the key on the array does not change. Generating a new
+  key shows a warning: the plugin cannot reach the array until the key is applied.
+- Fix: a panel credential generated but not applied yet survives a restart of the panel and is
+  offered again instead of being replaced.
+- Plugin and panel share one version number: 0.3.3. The appliance image carries the same number.
+
 ## 0.3.2-beta release - 2026-11-11
 - English is now the source language of the code, comments, messages and documentation; the
   interface defaults to English, with Portuguese and Spanish as translations.
@@ -14,32 +41,6 @@
   the snapshot backup tools, units and directories are `ibm-storage-cbt` (was `storwize-cbt`).
   "Prepare node" moves the backup state and removes the old command; schedules created before
   have to be created again.
-
-- Panel version follows the plugin: 0.3.2. The appliance image carries the same number.
-- Fix: the first opening of an unconfigured panel bounced between the sign-in and the initial setup
-  pages, which could leave the page without its styles.
-- Fix: the menu and pages could show without their layout when a stylesheet did not arrive. The
-  panel now checks that both stylesheets applied before drawing and fetches a missing one again.
-  File versions in the page address come from the file content, not its date, so a browser never
-  reuses a copy from another panel at the same address.
-- Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
-  PBS selector).
-- Trash: a disk removed in Proxmox (including the disks of a destroyed VM) is unmapped and renamed
-  `<prefix>-trash<time>-<volume>` instead of deleted, and kept for `sw-trash-days` (default 7).
-  The panel has a Trash tab with restore and delete; the CLI has `trash`, `trash-restore`,
-  `trash-delete` and `trash-purge`.
-- Fix (plugin): replacing the array key through the Proxmox API failed with "sw-address not set" on
-  Proxmox VE 9, which hands the update hook only the changed properties. The plugin now uses the
-  full update hook.
-- Fix (plugin): a new private key is written together with its public key file; ssh offered the
-  old public key from the file next to it and the array refused the new key.
-- Fix (plugin): the shared SSH connection to the array is tied to the key file, so a replaced key
-  opens a new connection instead of reusing one the array no longer accepts.
-- A new or reinstalled panel takes the array key of each storage from Proxmox when a node is
-  authorized or the storage is opened, so the key on the array does not change. Generating a new
-  key shows a warning: the plugin cannot reach the array until the key is applied.
-- Fix: a panel credential generated but not applied yet survives a restart of the panel and is
-  offered again instead of being replaced.
 
 ## 0.3.2 (plugin) - 2026-11-11
 - Two storage types in Proxmox with the same code: `storwize` (IBM Storwize and SVC) and `flashsystem`

@@ -25,7 +25,7 @@ use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
 
-our $VERSION = '0.3.2';
+our $VERSION = '0.3.3';
 
 # Storage API this module was validated against (PVE 9.2, libpve-storage-perl 9.1).
 my $TESTED_APIVER = 14;

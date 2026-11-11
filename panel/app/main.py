@@ -32,7 +32,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
