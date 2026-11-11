@@ -1355,7 +1355,27 @@ def wiz_cancel(wid: str, s=Depends(admin)):
 
 @app.post("/api/storages/{storeid}/credential/import")
 def cred_import(storeid: str, s=Depends(admin)):
-    c = storage_cfg(s, storeid)
+    import_plugin_key(s, storage_cfg(s, storeid))
+    return {"ok": True}
+
+
+def import_missing_keys(s):
+    """Proxmox keeps the array key of each storage; a new or reinstalled panel takes it from there
+    as soon as it can reach a node, so the array key does not have to change."""
+    done = []
+    for c in storwize_storages(s):
+        if store.has_array_key(c["storage"]):
+            continue
+        try:
+            import_plugin_key(s, c)
+            done.append(c["storage"])
+        except Exception:
+            pass
+    return done
+
+
+def import_plugin_key(s, c):
+    storeid = c["storage"]
     if not STOREID_RE.match(storeid) or not ADDR_RE.match(c.get("sw-address", "")):
         err(400, "invalid storage")
     if c.get("sw-sshkey"):
@@ -1395,7 +1415,6 @@ def cred_import(storeid: str, s=Depends(admin)):
     store.install_array_key(storeid, tmp)
     store.add_known_hosts(c["sw-address"], lines)
     drop_cache()
-    return {"ok": True}
 
 
 # --- give the panel a credential for an existing storage ---------------
@@ -1503,7 +1522,7 @@ async def node_trust(node: str, request: Request, s=Depends(admin)):
         nodessh.trust(ip, b.get("password", ""), hk)
     except NodeError as e:
         err(401, str(e))
-    return {"ok": True}
+    return {"ok": True, "imported": import_missing_keys(s)}
 
 
 def plugin_version():

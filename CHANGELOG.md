@@ -24,6 +24,9 @@
   reuses a copy from another panel at the same address.
 - Fix: the "protected" option of a backup schedule was not saved (its checkbox shared an id with the
   PBS selector).
+- A new or reinstalled panel takes the array key of each storage from Proxmox when a node is
+  authorized or the storage is opened, so the key on the array does not change. Generating a new
+  key shows a warning: the plugin cannot reach the array until the key is applied.
 - Fix: a panel credential generated but not applied yet survives a restart of the panel and is
   offered again instead of being replaced.
 

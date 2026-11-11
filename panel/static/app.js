@@ -625,8 +625,14 @@ function clockCell(ck) {
   return `${status(ok ? "ok" : "warn", ck.ntp ? `NTP ${ck.ntp}` : "no NTP")}<div class="helper">${esc(diff)}</div>`;
 }
 const CAP_LABEL = { flashcopy: "FlashCopy", child_pool: "Child pool", host_cluster: "Host cluster", rest_api: "REST API", volume_group: "Volume group", vg_snapshot: "Volume group snapshot", pbr: "PBR replication", partition: "Storage partition", safeguarded: "Safeguarded snapshot", recovery_test: "Recovery test" };
+const AUTO_IMPORT = new Set();
 async function pageStorage(id, tab = "resumo") {
-  const d = await api("GET", `/storages/${encodeURIComponent(id)}`);
+  let d = await api("GET", `/storages/${encodeURIComponent(id)}`);
+  // no panel credential yet: take the plugin key from Proxmox first, once per visit
+  if (!d.panel_credential && ME.admin && !AUTO_IMPORT.has(id)) {
+    AUTO_IMPORT.add(id);
+    try { await api("POST", `/storages/${encodeURIComponent(id)}/credential/import`); toast("ok", "Credential imported", "The panel now uses the plugin key"); d = await api("GET", `/storages/${encodeURIComponent(id)}`); } catch (e) { }
+  }
   const c = d.config, a = d.array, pfx = (c["sw-prefix"] || "pve") + "-";
   const active = d.status.some(x => x.active);
   const managed = a.ok ? a.vdisks.filter(v => v.name.startsWith(pfx)) : [];
@@ -835,7 +841,8 @@ function bindStorageOvf(id, d) {
 async function credentialFlow(id) {
   let r; try { r = await api("POST", `/storages/${encodeURIComponent(id)}/credential`); } catch (e) { return toast("err", "Error", e.message); }
   await modal({ label: id, title: "Panel credential", size: "md",
-    body: `<ol class="steps-list"><li><span>Copy the public key below.</span></li>
+    body: `${notification("warn", "Replacing the key stops the Proxmox plugin until the last step", "Use a new key only when the plugin key does not open the array. From the moment the key changes on the array until you click Test and apply, Proxmox cannot reach the array. A key generated here is kept by the panel until it is applied, even if the panel restarts.")}
+      <ol class="steps-list"><li><span>Copy the public key below.</span></li>
       <li><span>In the array GUI, open <b>Access › Users › ${esc(r.user)}</b> and replace the <b>SSH Public Key</b>. On firmware 7.x each user has a single key.</span></li>
       <li><span>Click <b>Test and apply</b>: the panel tests the key and updates the Proxmox plugin.</span></li></ol>
       <div class="codebox"><span id="pk">${esc(r.pubkey)}</span><span class="copy">${btn("", "ghost", 'data-copy="pk" title="Copy" aria-label="Copy"', "copy", "sm")}</span></div>
@@ -1359,7 +1366,7 @@ async function trustNode(node) {
     buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Authorize", kind: "primary" }],
     onButton: async (id, root) => {
       if (id !== "go") return false;
-      try { await busy($("[data-b=go]", root), () => api("POST", `/nodes/${encodeURIComponent(node)}/trust`, { password: $("#np").value, fingerprint: hk.fingerprint })); toast("ok", "Node authorized", node); main.dataset.route = ""; route(); return false; }
+      try { const rt = await busy($("[data-b=go]", root), () => api("POST", `/nodes/${encodeURIComponent(node)}/trust`, { password: $("#np").value, fingerprint: hk.fingerprint })); toast("ok", "Node authorized", node); for (const sid of (rt && rt.imported) || []) toast("ok", "Credential imported", sid); main.dataset.route = ""; route(); return false; }
       catch (e) { toast("err", "Could not authorize", e.message); return true; }
     } });
 }

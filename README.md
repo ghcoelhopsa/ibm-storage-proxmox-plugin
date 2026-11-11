@@ -156,6 +156,12 @@ the array reports: `flashsystem` for FlashSystem, `storwize` for Storwize and SV
 
 From then on the storage behaves like any other in the Proxmox interface.
 
+**Reinstalling or replacing the panel.** The array key of each storage is kept by Proxmox, not only
+by the panel. A new panel takes it from there when you authorize a node (or when you open the
+storage), so nothing changes on the array. Generate a new key only when the Proxmox key no longer
+opens the array: from the moment it changes on the array until you click **Test and apply**, the
+plugin cannot reach the array.
+
 ### Installing the plugin without the panel
 
 On every node:
