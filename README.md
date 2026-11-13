@@ -135,8 +135,11 @@ around it.
 on the Proxmox node:
 
 ```bash
-wget https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta/ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst
-pct restore <ctid> ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst --storage <storage> --unprivileged 1 --unique 1
+R=https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta
+I=ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst
+wget $R/$I $R/$I.sig https://raw.githubusercontent.com/ghcoelhopsa/ibm-storage-proxmox-plugin/main/panel/app/release-key.pem
+openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in $I -sigfile $I.sig   # must print "Signature Verified Successfully"
+pct restore <ctid> $I --storage <storage> --unprivileged 1 --unique 1
 pct start <ctid>
 pct console <ctid>      # shows the panel address and the installation code
 ```
@@ -213,17 +216,20 @@ cp examples/multipath.conf.example /etc/multipath.conf   # review the blacklist 
 systemctl enable --now multipathd
 ./scripts/install.sh
 
-./scripts/setup-ssh-key.sh v7k 192.168.15.20     # creates the key and records the array host key
+./scripts/setup-ssh-key.sh v7k 192.0.2.20     # creates the key and records the array host key
 # register the public key on the array user, then:
-pvesm add storwize v7k --sw-address 192.168.15.20 --sw-user pveplugin --sw-api ssh \
+pvesm add storwize v7k --sw-address 192.0.2.20 --sw-user pveplugin --sw-api ssh \
     --sw-pool PVE_Pool --sw-hosts Proxmox --content images --shared 1
 ```
 
 With the REST backend the password is stored in `/etc/pve/priv/storwize/<id>.pw` and the TLS
-fingerprint is pinned when the storage is added:
+certificate fingerprint is pinned when the storage is added, or when an existing SSH storage gets a
+password. Compare the printed fingerprint with the one the array shows (`lssystemcert` or the GUI).
+Without a pin the plugin only accepts a certificate that the system CAs validate for the address;
+it never sends the password over an unverified connection.
 
 ```bash
-pvesm add flashsystem fs5200 --sw-address 10.0.0.50 --sw-user pveplugin --sw-api rest --password \
+pvesm add flashsystem fs5200 --sw-address 198.51.100.50 --sw-user pveplugin --sw-api rest --password \
     --sw-pool Pool_SSD --sw-hostcluster pve-cluster --sw-prefix pvefs --content images --shared 1
 ```
 
@@ -365,16 +371,40 @@ an array volume with Safeguarded snapshots.
 
 ## Security
 
+### Threat model
+
+The array user of the plugin, and the panel that holds the same key, can create and remove the
+volumes, mappings and snapshots of the pool. **Whoever controls a Proxmox node as root, or the
+panel container, controls the volumes of the array.** Protect them as you protect the array
+management: restricted management network, the panel reachable only by administrators, Proxmox
+users with the least privilege (the panel needs `Sys.Audit` to read and `Sys.Modify` to change).
+
+- **Array role: Administrator.** It is the smallest built-in role that covers the plugin, which
+  removes volumes, host mappings and snapshots; RestrictedAdmin cannot remove them, and CopyOperator
+  cannot create volumes. Never use Security Administrator: Safeguarded snapshots and Safeguarded
+  policies stay out of reach of this user, so a compromised node or panel cannot delete them.
+- **Safeguarded snapshots are the recovery path against a compromised node or panel.** Put the VMs
+  that matter in a Safeguarded snapshot policy.
+- **Updates:** the panel package and the appliance image are signed with the project key
+  (Ed25519, public key `panel/app/release-key.pem`, SHA-256 of the key
+  `c21923a5b4d96344dae3aba7efb5e388b8f9747c05886b385d4d0f8c81a1a47c`). The panel and the root installer refuse an unsigned or changed
+  package. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
+### Controls
+
 - No credentials in the code or in `storage.cfg`. The SSH key and REST password live in
   `/etc/pve/priv/storwize/` on the nodes and in `/var/lib/swpanel/` in the panel container.
 - The plugin only creates, changes or removes volumes that carry its prefix, and only removes a
   FlashCopy whose target follows the `<prefix>-vm-N-..._s_<snapshot>` pattern.
 - Every argument sent to the array is checked against `^[A-Za-z0-9_.:=*%/-]+$` and single-quoted.
-- SSH uses strict host key checking with its own `known_hosts`; the REST certificate is pinned.
+- SSH uses strict host key checking with its own `known_hosts`. REST uses the pinned certificate,
+  or a certificate valid under the system CAs; never an unverified connection.
 - The panel authenticates against Proxmox, keeps no passwords, pins the Proxmox certificate,
-  rate-limits sign-in attempts and sends a restrictive Content-Security-Policy.
-- The array user should be Administrator, never Security Administrator, so that Safeguarded
-  snapshots cannot be removed through the panel.
+  limits failed sign-ins per address and per account, requires a custom header on every change
+  (CSRF), and sends a restrictive Content-Security-Policy.
+- The panel runs as an unprivileged user with `NoNewPrivileges` and a read-only system; only the
+  update installer runs as root, and it checks the package signature again.
+- Third-party assets (Carbon, IBM Plex) are pinned by sha512 before they enter the signed package.
 
 ## Limitations
 

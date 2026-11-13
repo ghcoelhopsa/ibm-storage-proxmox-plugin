@@ -54,7 +54,8 @@ def source():
 
 
 def _get(url, **kw):
-    r = requests.get(url, timeout=kw.pop("timeout", 30), headers={"Accept": "application/vnd.github+json",
+    timeout = kw.pop("timeout", 30)
+    r = requests.get(url, timeout=timeout, headers={"Accept": "application/vnd.github+json",
                      "User-Agent": "ibm-storage-plugin-proxmox-panel"}, **kw)
     r.raise_for_status()
     return r

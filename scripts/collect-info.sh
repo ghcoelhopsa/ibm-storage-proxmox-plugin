@@ -4,9 +4,11 @@
 #   ./scripts/collect-info.sh [storeid]
 set -uo pipefail
 ST="${1:-}"
+if [ -n "$ST" ] && [[ ! "$ST" =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]]; then echo "invalid storage id: $ST" >&2; exit 1; fi
 OUT="collect-$(hostname)-$(date +%Y%m%d-%H%M%S).txt"
 
-run() { echo; echo "### $*"; eval "$@" 2>&1; }
+# fixed command lines only; the storage id is checked above and passed as data, never as code
+run() { echo; echo "### $*"; bash -c "$1" 2>&1; }
 {
     run pveversion -v
     run "perl -MPVE::Storage -e 'print PVE::Storage::APIVER, q{ }, PVE::Storage::APIAGE, qq{\n}'"
@@ -22,10 +24,16 @@ run() { echo; echo "### $*"; eval "$@" 2>&1; }
     run "pve-ibm-storage list"
     run "pve-ibm-storage stale-paths"
     if [ -n "$ST" ]; then
-        run "pve-ibm-storage info $ST"
-        run "pve-ibm-storage inventory $ST"
-        SSH="perl -MPVE::Storage -MPVE::Storage::Custom::StorwizePlugin -e 'my \$s=PVE::Storage::config()->{ids}->{$ST}; my \$P=q{PVE::Storage::Custom::StorwizePlugin}; for my \$c (qw(lssystem lsmdiskgrp lshost lshostcluster lsvdisk lsfcmap lslicense)) { print qq{-- \$c\n}; my \$r = eval { \$P->can(q{sw_list})->(\$s, q{$ST}, \$c, []) }; print \$@ if \$@; print join(q{:}, map { \$_ // q{} } %\$_), qq{\n} for @{\$r // []}; }'"
-        run "$SSH"
+        echo; echo "### pve-ibm-storage info $ST"; pve-ibm-storage info "$ST" 2>&1
+        echo; echo "### pve-ibm-storage inventory $ST"; pve-ibm-storage inventory "$ST" 2>&1
+        echo; echo "### array (read-only listings)"
+        ST="$ST" perl -MPVE::Storage -MPVE::Storage::Custom::StorwizePlugin -e '
+            my $st = $ENV{ST}; my $s = PVE::Storage::config()->{ids}->{$st} or die "no storage $st\n";
+            my $P = "PVE::Storage::Custom::StorwizePlugin";
+            for my $c (qw(lssystem lsmdiskgrp lshost lshostcluster lsvdisk lsfcmap lslicense)) {
+                print "-- $c\n"; my $r = eval { $P->can("sw_list")->($s, $st, $c, []) }; print $@ if $@;
+                print join(":", map { $_ // "" } %$_), "\n" for @{ $r // [] };
+            }' 2>&1
     fi
     run "journalctl -u pvedaemon -u pvestatd --since '-1h' --no-pager | grep -i storwize | tail -50"
 } > "$OUT"

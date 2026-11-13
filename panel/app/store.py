@@ -105,7 +105,7 @@ def save_stats(storeid, values, ts=None):
 
 def load_stats(storeid, names, since):
     c = db()
-    q = f"SELECT ts, name, value FROM stats WHERE storeid=? AND ts>=? AND name IN ({','.join('?' * len(names))}) ORDER BY ts"
+    q = f"SELECT ts, name, value FROM stats WHERE storeid=? AND ts>=? AND name IN ({','.join('?' * len(names))}) ORDER BY ts"  # nosec B608 - only placeholders
     rows = c.execute(q, [storeid, since, *names]).fetchall()
     c.close()
     out = {n: [] for n in names}

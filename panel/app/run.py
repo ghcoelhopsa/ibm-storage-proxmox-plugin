@@ -46,7 +46,7 @@ class Port80(http.server.BaseHTTPRequestHandler):
 
 def port80():
     try:
-        srv = http.server.ThreadingHTTPServer(("0.0.0.0", 80), Port80)
+        srv = http.server.ThreadingHTTPServer(("0.0.0.0", 80), Port80)  # nosec B104 - the panel is served on every interface of its container
     except OSError as e:
         print(f"port 80 unavailable ({e}); no redirect and no Let's Encrypt HTTP challenge", flush=True)
         return
@@ -60,5 +60,5 @@ if __name__ == "__main__":
     print(f"certificate in use: {crt}", flush=True)
     # keep-alive longer than the browser's: the browser is always the one that closes an idle
     # connection, so it never tries to reuse a connection the server has just closed
-    uvicorn.run("main:app", host="0.0.0.0", port=443, ssl_keyfile=key, ssl_certfile=crt,
+    uvicorn.run("main:app", host="0.0.0.0", port=443, ssl_keyfile=key, ssl_certfile=crt,  # nosec B104 - the panel is served on every interface of its container
                 proxy_headers=True, server_header=False, timeout_keep_alive=620)

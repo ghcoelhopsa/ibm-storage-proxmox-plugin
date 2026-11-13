@@ -5,7 +5,7 @@
 
 # Storwize V7000 Gen1, firmware 7.8.1 - SSH backend (no REST API)
 storwize: v7k
-	sw-address 192.168.15.20
+	sw-address 192.0.2.20
 	sw-api ssh
 	sw-user pveplugin
 	sw-pool PVE_Pool
@@ -15,7 +15,7 @@ storwize: v7k
 
 # FlashSystem 8.x - REST backend (port 7443), host cluster, volume group for PBR
 #storwize: fs5200
-#	sw-address 10.0.0.50
+#	sw-address 198.51.100.50
 #	sw-api rest
 #	sw-user pveplugin
 #	sw-fingerprint AA:BB:...   (pinned automatically by pvesm add)

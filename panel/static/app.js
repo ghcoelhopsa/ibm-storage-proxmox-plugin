@@ -462,7 +462,7 @@ async function pageSetup() {
   const form = `<div class="form-stack">
       ${first ? textInput("s-code", "Installation code", 'autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX"',
         "Shown on the panel container console. Valid only until the first setup.") : ""}
-      <div class="form-row">${textInput("s-host", "Proxmox VE address", `placeholder="192.168.15.16" value="${esc(first ? "" : ME.pve_host || "")}" autocapitalize="off" spellcheck="false"`, "IP or name of a cluster node.")}
+      <div class="form-row">${textInput("s-host", "Proxmox VE address", `placeholder="192.0.2.16" value="${esc(first ? "" : ME.pve_host || "")}" autocapitalize="off" spellcheck="false"`, "IP or name of a cluster node.")}
       ${textInput("s-port", "API port", 'type="number" min="1" max="65535" value="8006"')}</div>
       <div id="s-fp"></div><div id="s-err"></div>
       <div>${btn("Fetch certificate", "primary", 'id="s-probe"', "connect")}</div></div>`;
@@ -946,7 +946,7 @@ async function pageWizard() {
   const s1 = () => {
     W.step = 0;
     render(`<h2>Array address</h2><p class="lead">Enter the management IP of the IBM Storwize, FlashSystem or SVC and the user Proxmox will use.</p>
-      <div class="form-stack" style="max-width:32rem">${textInput("w-addr", "Management IP or name", `placeholder="192.168.15.20" value="${esc(W.address || "")}" autocapitalize="off" spellcheck="false"`)}
+      <div class="form-stack" style="max-width:32rem">${textInput("w-addr", "Management IP or name", `placeholder="192.0.2.20" value="${esc(W.address || "")}" autocapitalize="off" spellcheck="false"`)}
       ${textInput("w-user", "User on the array", `value="${esc(W.user || "pveplugin")}" autocapitalize="off" spellcheck="false"`, "User in the <b>Administrator</b> group (creates and deletes volumes). Create it in the array GUI under Access › Users if it does not exist yet.")}</div>`, { next: "Generate key", nextIcon: "password" });
     $("#w-addr").focus();
     $("#w-next").onclick = async () => {
@@ -1052,7 +1052,7 @@ async function pageWizard() {
         ${textInput("r-prefix", "Volume prefix", `value="${esc(sugg)}" maxlength="16"`, "Every Proxmox volume starts with this prefix. The plugin only touches volumes that have it.")}
         ${selectInput("r-snap", "Snapshot pool", [{ v: "", t: `Same as the volumes (${W.pool})` }, ...i.pools.filter(p => p.name !== W.pool).map(p => ({ v: p.name, t: p.name }))])}
         ${selectInput("r-tr", "Transport", [{ v: "", t: "Fibre Channel / iSCSI (multipath)" }, { v: "nvme-tcp", t: "NVMe over TCP — experimental" }])}
-        <div id="r-po-w" hidden>${textInput("r-po", "Array NVMe/TCP ports", 'placeholder="10.0.0.11,10.0.0.12" autocapitalize="off" spellcheck="false"', "IP (or IP:port) of the array data ports, comma separated. The nodes need the NVMe over TCP step in Proxmox nodes, and the host on the array must be created with the node's NQN.")}</div>
+        <div id="r-po-w" hidden>${textInput("r-po", "Array NVMe/TCP ports", 'placeholder="198.51.100.11,198.51.100.12" autocapitalize="off" spellcheck="false"', "IP (or IP:port) of the array data ports, comma separated. The nodes need the NVMe over TCP step in Proxmox nodes, and the host on the array must be created with the node's NQN.")}</div>
         ${checkbox("r-thin", "Thin-provisioned volumes", true)}${checkbox("r-ct", "Allow container disks (rootdir)", false)}
         ${checkbox("r-cg", "Snapshots consistent across the VM disks (FlashCopy consistency group)", true)}
         ${i.capabilities.vg_snapshot ? selectInput("r-sm", "Snapshot engine", [{ v: "flashcopy", t: "FlashCopy (all versions) — recommended" }, { v: "volumegroup", t: "Volume group + addsnapshot (8.5.1+) — experimental" }], "Volume group mode creates one volume group per VM on the array. Not yet validated on 8.x hardware.") : ""}
