@@ -1467,16 +1467,26 @@ async function updateProgress(v) {
   await modal({ label: `${tr("Version")} ${v}`, title: "Updating the panel", size: "sm", buttons: [],
     body: `<p id="up-msg" class="helper">${esc(tr("waiting for the installer"))}…</p><div class="bar" style="margin-top:1rem"><span class="up-bar" style="width:15%"></span></div>`,
     onOpen: async root => {
+      // polls the public /api/info: the restart ends the sessions, so the session API answers 401
       const end = Date.now() + 5 * 60000; let seen = false;
+      const STEP = { queued: "waiting for the installer", installing: "installing" };
       while (Date.now() < end) {
         await new Promise(r => setTimeout(r, 2500));
         try {
-          const s = await api("GET", "/update/status");
+          const r = await fetch("/api/info", { cache: "no-store" });
+          if (!r.ok) throw new Error(r.status);
+          const i = await r.json(), u = i.update || {};
           seen = true;
-          if (s.status && s.status.message) $("#up-msg", root).textContent = tr(s.status.message);
-          if (s.current === v) { $("#up-msg", root).textContent = tr("Done. Reloading…"); setTimeout(() => location.reload(), 1200); return; }
-          if (s.status && s.status.state === "failed") { $("#up-msg", root).innerHTML = notification("err", "Update failed", esc(s.status.message)); return; }
-        } catch (e) { if (seen) $("#up-msg", root).textContent = tr("restarting the panel"); }
+          if (i.version === v) {
+            $("#up-msg", root).textContent = tr("Done. Reloading… sign in again if asked.");
+            setTimeout(() => { location.hash = "#/updates"; location.reload(); }, 1500); return;
+          }
+          if (u.version === v && u.state === "failed") {
+            $("#up-msg", root).innerHTML = notification("err", "Update failed", esc(tr("The previous version is running. Sign in and open Updates for the details.")));
+            return;
+          }
+          if (STEP[u.state]) $("#up-msg", root).textContent = tr(STEP[u.state]) + "…";
+        } catch (e) { if (seen) $("#up-msg", root).textContent = tr("restarting the panel") + "…"; }
       }
       $("#up-msg", root).innerHTML = notification("warn", "The panel did not come back in 5 minutes", esc(tr("Open the container console: /var/lib/swpanel/update/update.log")));
     } });

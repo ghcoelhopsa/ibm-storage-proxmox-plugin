@@ -60,3 +60,4 @@ the tests marked with (auto).
 | T53 | REST certificate pin | `rest_ua` with the right pin, a wrong pin and no pin, against the FS7600 | right: connects; wrong and none: refused (self-signed certificate) | Passed |
 | T54 | panel CSRF and sign-in limits | POST /api/logout without the header; 22 wrong passwords | 403; 429 from the 9th attempt | Passed |
 | T55 | build with pinned assets | build with the right sha512 and with a changed one | same assets as before; changed hash stops the build | Passed |
+| T56 | update progress without a session | update a 0.3.6 container to 0.3.7 and poll /api/info without signing in | new version and update state visible during the restart | Passed |

@@ -33,7 +33,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -340,7 +340,11 @@ def array_snapshot(scfg, ttl=30, force=False):
 
 @app.get("/api/info")
 def info():
-    return {"name": PRODUCT, "version": VERSION, "stage": STAGE, "configured": bool(CFG)}
+    # the update state is here (no session needed): the panel restarts to install an update, and
+    # the sessions, kept in memory, do not survive it. Only the state and the target version.
+    st = updates.status()
+    return {"name": PRODUCT, "version": VERSION, "stage": STAGE, "configured": bool(CFG),
+            "update": {"state": st.get("state", ""), "version": st.get("version", "")} if st else None}
 
 
 # ---------------------------------------------------------------------------
