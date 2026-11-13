@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6-beta - 2026-11-13
+- First boot of the appliance: the container console shows the panel address and the installation
+  code on the login screen as soon as the panel writes them, without logging in. Before, the login
+  screen was drawn before the code existed and showed it only after pressing Enter.
+- When the panel is configured, the login screen goes back to the standard one at once.
+- README: how to read the code from the node with `pct exec <ctid> -- cat /var/lib/swpanel/setup-code`.
+
 ## 0.3.5-beta - 2026-11-13
 - Panel update from the panel: the new **Updates** page lists the newer releases with their notes
   and installs the chosen one with one click. Only the panel code is replaced; the container, its

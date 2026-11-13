@@ -23,7 +23,7 @@ It has three parts:
 
 | | |
 |---|---|
-| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.5-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.5-beta/ibm-storage-plugin-proxmox-panel-0.3.5-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
+| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta/ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
 | **All releases** | [Releases page](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases), with the checksum of each image |
 | **Source** | `git clone https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin.git` |
 | **Runs on** | Proxmox VE 9.x (tested on 9.2, single node and two-node cluster) |
@@ -135,11 +135,15 @@ around it.
 on the Proxmox node:
 
 ```bash
-wget https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.5-beta/ibm-storage-plugin-proxmox-panel-0.3.5-beta.tar.zst
-pct restore <ctid> ibm-storage-plugin-proxmox-panel-0.3.5-beta.tar.zst --storage <storage> --unprivileged 1 --unique 1
+wget https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta/ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst
+pct restore <ctid> ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst --storage <storage> --unprivileged 1 --unique 1
 pct start <ctid>
 pct console <ctid>      # shows the panel address and the installation code
 ```
+
+The console shows the address and the code on the login screen, without logging in. A blank
+console means the screen was drawn before you opened it: press Enter. The code can also be read
+from the node: `pct exec <ctid> -- cat /var/lib/swpanel/setup-code`.
 
 The image is a Debian 13 container with the panel installed and nothing configured. It takes its
 address from DHCP on `vmbr0` (change it with `pct set <ctid> --net0 ...`), creates its own
