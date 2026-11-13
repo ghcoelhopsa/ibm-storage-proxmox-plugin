@@ -32,7 +32,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -275,6 +275,9 @@ def array_snapshot(scfg, ttl=30, force=False):
             "ev": lambda: opt(lambda: a.ls("lseventlog", [("alert", "yes"), ("fixed", "no"), ("order", "severity")]), []),
             "enclosures": lambda: opt(lambda: a.ls("lsenclosure"), []),
             "nodes": lambda: opt(lambda: a.ls("lsnodecanister"), None) or a.ls("lsnode"),
+            # 8.5.1+: volume group snapshots (manual, by policy, Safeguarded) and the policy of each group
+            "vgsnaps": lambda: opt(lambda: a.ls("lsvolumegroupsnapshot"), []),
+            "vgpol": lambda: opt(lambda: a.ls("lsvolumegroupsnapshotpolicy"), []),
         }
         with ThreadPoolExecutor(max_workers=6) as ex:        # independent queries, in parallel
             futs = {k: ex.submit(f) for k, f in jobs.items()}
@@ -303,6 +306,7 @@ def array_snapshot(scfg, ttl=30, force=False):
             "hosts": hosts, "hostmaps": hostmaps, "hostclusters": hclusters, "stats": stats,
             "rcrelationships": rcrel, "events": events, "enclosures": enclosures, "nodes": nodes,
             "throttles": throttles or [], "throttle_supported": throttles is not None, "clock": clock,
+            "vgsnaps": R["vgsnaps"], "vgpol": R["vgpol"],
         }
 
     try:
@@ -630,6 +634,28 @@ def inventory_api(s=Depends(session)):
         d["array_limit"] = vdisk_throttle(a, d["vdisk"])
         d["perf_now"] = latest_stats(f"lun:{(d.get('uid') or '').upper()}") if d.get("uid") else None
         d["throttle_supported"] = a.get("throttle_supported", False)
+    # snapshots of the VM's volume group on the array: the ones Proxmox does not know about
+    # (taken by a policy, Safeguarded, from the panel) are only visible here
+    for v in inv["vms"]:
+        v["array_snapshots"], v["array_policies"] = [], []
+        for sid in sorted({d["storage"] for d in inv["disks"] if d["vmid"] == v["vmid"]}):
+            c, a = inv["storages"][sid], arrays.get(sid, {})
+            if c.get("sw-snapmode") != "volumegroup":
+                continue
+            vg = f"{c.get('sw-prefix', 'pve')}-vm-{v['vmid']}"
+            for r in a.get("vgsnaps", []):
+                if r.get("volume_group_name") == vg:
+                    v["array_snapshots"].append({
+                        "storage": sid, "vg": vg, "name": r.get("name") or r.get("snapshot_name"),
+                        "time": r.get("time") or "", "expires": r.get("expiration_time") or "",
+                        "safeguarded": sv8._yes(r.get("safeguarded")), "auto": sv8._yes(r.get("auto_snapshot")),
+                        "state": r.get("state") or "", "anomaly": r.get("anomaly_status") or ""})
+            for r in a.get("vgpol", []):
+                if (r.get("volume_group_name") or r.get("name")) == vg and r.get("snapshot_policy_name"):
+                    v["array_policies"].append({"storage": sid, "policy": r["snapshot_policy_name"],
+                                                "safeguarded": sv8._yes(r.get("snapshot_policy_safeguarded")),
+                                                "next": r.get("snapshot_policy_next_time") or ""})
+        v["array_snapshots"].sort(key=lambda x: x["time"], reverse=True)
     return {"vms": inv["vms"], "disks": inv["disks"]}
 
 
@@ -1082,8 +1108,17 @@ def storage_fc(storeid: str, s=Depends(session)):
         err(502, f"array: {e}")
     nodes = cached("nodefc", 30, lambda: node_fc(s))        # SSH to the nodes: kept for 30 s and refreshed in the background
     by_wwpn = {p["wwpn"]: (n["node"], p) for n in nodes for p in n["ports"]}
+    # 8.x/9.x direct attach: the array runs the fabric itself, so its "switch" is an array WWPN; the
+    # link is found by the fabric name, which only that one HBA port sees
+    fab = {}
+    for n in nodes:
+        for p in n["ports"]:
+            if p.get("fabric") and p["fabric"] != "0":
+                fab.setdefault(p["fabric"], []).append((n["node"], p))
     for p in arr["ports"]:
         peer = by_wwpn.get(p.get("switch_WWPN", ""))
+        if not peer and len(fab.get(p.get("fabric_WWN", ""), [])) == 1:
+            peer = fab[p["fabric_WWN"]][0]
         if peer:                       # direct attach: the "switch" is the node's own HBA
             p["peer"] = {"node": peer[0], "host": peer[1]["host"], "wwpn": peer[1]["wwpn"], "direct": True}
         elif p.get("switch_WWPN"):
@@ -1986,6 +2021,9 @@ def array_call(fn, *a):
         msg = str(e)
         if "CMMVC8851E" in msg:
             msg = "the snapshot is Safeguarded: only a Security Administrator of the array can remove it before it expires"
+        elif "CMMVC8853E" in msg:
+            msg = ("the policy is Safeguarded on this volume group: only a Security Administrator of the array can"
+                   " take it off or change it")
         err(502, f"array: {msg}")
     drop_cache("array:")
     return r
@@ -2010,6 +2048,7 @@ def storage_protection(storeid: str, s=Depends(session)):
         vm = names.get(g["vmid"])
         g["vm_name"] = vm.get("name") if vm else None
         g["vm_status"] = vm.get("status") if vm else None
+        g["vm_node"] = vm.get("node") if vm else None
     d["snapmode"] = scfg.get("sw-snapmode", "flashcopy")
     return d
 
@@ -2040,6 +2079,121 @@ def vg_snapshot_restore(storeid: str, vg: str, snap: str, s=Depends(admin)):
     return array_call(sv8.restore_snapshot, array_for(scfg), vg, snap)
 
 
+@app.get("/api/nextid")
+def next_vmid(s=Depends(session)):
+    return {"vmid": to_int(pcall(s, "GET", "/cluster/nextid"))}
+
+
+VMNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$")
+
+
+def snapshot_vm_params(cfg, storeid, volmap, prefix, name):
+    """Parameters of POST /nodes/{node}/qemu for a VM made from clones of another VM's disks.
+
+    Disks on this storage point to the clones; cloud-init gets a new drive; disks on other
+    storages are left out (returned in `skipped`). MAC addresses, SMBIOS UUID and VM generation
+    id are left for Proxmox to generate, so both VMs can run at the same time."""
+    params, skipped = {}, []
+    for k, v in cfg.items():
+        v = str(v)
+        if dr.DROP_RE.match(k) or k in dr.SECRET_KEYS or k in ("name", "vmgenid"):
+            continue
+        if dr.DISK_RE.match(k):
+            vol, _, rest = v.partition(",")
+            st, _, vname = vol.partition(":")
+            if "cloudinit" in vname:
+                params[k] = f"{st}:cloudinit,media=cdrom"
+            elif "media=cdrom" in v:
+                params[k] = v
+            elif st == storeid and f"{prefix}-{vname}" in volmap:
+                nv = volmap[f"{prefix}-{vname}"][len(prefix) + 1:]
+                params[k] = f"{storeid}:{nv}" + ("," + rest if rest else "")
+            else:
+                skipped.append(f"{k} ({vol})")
+            continue
+        if dr.NET_RE.match(k):
+            v = re.sub(r"^([A-Za-z0-9]+)=[0-9A-Fa-f:]{17}", r"\1", v)
+        if k == "smbios1":
+            v = ",".join(p for p in v.split(",") if not p.startswith("uuid="))
+            if not v:
+                continue
+        params[k] = v
+    if "vmgenid" in cfg:
+        params["vmgenid"] = "1"
+    params["name"] = name
+    m = re.match(r"^order=(.*)$", params.get("boot", ""))
+    if m:
+        keep = [d for d in m.group(1).split(";") if d in params]
+        if keep:
+            params["boot"] = "order=" + ";".join(keep)
+        else:
+            del params["boot"]
+    return params, skipped
+
+
+@app.post("/api/storages/{storeid}/vg/{vg}/snapshots/{snap}/newvm")
+async def vg_snapshot_newvm(storeid: str, vg: str, snap: str, request: Request, s=Depends(admin)):
+    """New VM from a volume group snapshot: thinclone (instant, keeps using the snapshot) or clone
+    (also instant to use; the array copies the data in the background and it becomes independent)."""
+    scfg = storage_cfg(s, storeid)
+    src = vg_checked(scfg, vg)
+    if not sv8.SNAPNAME_RE.match(snap):
+        err(400, "invalid snapshot name")
+    if scfg.get("sw-partition"):
+        err(400, "not available for storages inside a storage partition yet")
+    if scfg.get("sw-snapmode", "flashcopy") != "volumegroup":
+        err(400, "the storage does not use the volume group snapshot engine")
+    b = await request.json()
+    kind, newid, name, node = str(b.get("type", "")), to_int(b.get("vmid")), str(b.get("name", "")).strip(), str(b.get("node", ""))
+    if kind not in sv8.CLONE_TYPES:
+        err(400, "type must be thinclone or clone")
+    if not 100 <= newid <= 999999999:
+        err(400, "invalid VMID")
+    if not VMNAME_RE.match(name):
+        err(400, "invalid VM name (letters, digits, '.' and '-')")
+    if not NAME_RE.match(node):
+        err(400, "invalid node")
+    if guest_status(s, newid):
+        err(409, f"VMID {newid} is already in use")
+    g = guest_status(s, src)
+    if not g or g.get("type") != "qemu":
+        err(409, f"VM {src} does not exist on this cluster: its configuration is needed to create the copy")
+    snaps = {x.get("name") for x in pcall(s, "GET", f"/nodes/{g['node']}/qemu/{src}/snapshot") or []}
+    cfg = pcall(s, "GET", f"/nodes/{g['node']}/qemu/{src}/snapshot/{snap}/config") if snap in snaps \
+        else pcall(s, "GET", f"/nodes/{g['node']}/qemu/{src}/config")
+    prefix = scfg.get("sw-prefix", "pve")
+    vols = []
+    for k, v in cfg.items():
+        if dr.DISK_RE.match(k) and "media=cdrom" not in str(v):
+            st, _, vname = str(v).split(",", 1)[0].partition(":")
+            if st == storeid and "cloudinit" not in vname:
+                vols.append(f"{prefix}-{vname}")
+    if not vols:
+        err(409, f"VM {src} has no disk on storage {storeid}")
+    a = array_for(scfg)
+    hosts = [h for h in (scfg.get("sw-hosts") or "").split(",") if h]
+    volmap = array_call(sv8.clone_from_snapshot, a, prefix, vg, snap, kind, newid, scfg["sw-pool"], vols,
+                        scfg.get("sw-hostcluster"), hosts)
+    params, skipped = snapshot_vm_params(cfg, storeid, volmap, prefix, name)
+    try:
+        res = run_task(s, node, pcall(s, "POST", f"/nodes/{node}/qemu", vmid=newid, **params))
+    except HTTPException:
+        # the VM was not created: the clones would be left without an owner
+        for nv in volmap.values():
+            try:
+                a.run("rmvdisk", [("removehostmappings", None)], nv)
+            except ArrayError:
+                pass
+        try:
+            a.run("rmvolumegroup", None, f"{prefix}-vm-{newid}")
+        except ArrayError:
+            pass
+        raise
+    if b.get("start"):
+        res["start"] = run_task(s, node, pcall(s, "POST", f"/nodes/{node}/qemu/{newid}/status/start"))
+    return {"vmid": newid, "volumes": volmap, "skipped": skipped, "task": res}
+
+
 @app.delete("/api/storages/{storeid}/vg/{vg}/snapshots/{snap}")
 def vg_snapshot_remove(storeid: str, vg: str, snap: str, s=Depends(admin)):
     scfg = storage_cfg(s, storeid)
@@ -2047,6 +2201,45 @@ def vg_snapshot_remove(storeid: str, vg: str, snap: str, s=Depends(admin)):
     if not sv8.SNAPNAME_RE.match(snap):
         err(400, "invalid snapshot name")
     return array_call(sv8.remove_snapshot, array_for(scfg), vg, snap)
+
+
+@app.post("/api/storages/{storeid}/snapshot-policies")
+async def snapshot_policy_add(storeid: str, request: Request, s=Depends(admin)):
+    """New snapshot policy on the array, optionally assigned right away to VM volume groups."""
+    scfg = storage_cfg(s, storeid)
+    b = await request.json()
+    a = array_for(scfg)
+    name, unit = str(b.get("name", "")), str(b.get("unit", ""))
+    interval, days = to_int(b.get("interval")), to_int(b.get("retention_days"))
+    if interval < 1 or not 1 <= days <= 3650:
+        err(400, "interval from 1, retention from 1 to 3650 days")
+    try:
+        sysd = a.show("lssystem") or {}
+        start = sv8.array_start_time(sysd, str(b.get("start"))) if b.get("start") else None
+    except (ArrayError, subprocess.TimeoutExpired) as e:
+        err(400 if isinstance(e, ArrayError) else 502, str(e))
+    out = {"policy": array_call(sv8.create_snapshot_policy, a, name, unit, interval, days, start), "assigned": [], "failed": []}
+    prefix = scfg.get("sw-prefix", "pve")
+    for vg in b.get("volume_groups") or []:
+        vg = str(vg)
+        if not sv8.VG_RE.match(vg) or sv8.guest_of(prefix, vg) is None:
+            out["failed"].append({"vg": vg, "error": "outside the scope of this storage"})
+            continue
+        try:
+            sv8.set_snapshot_policy(a, vg, name, bool(b.get("safeguarded")), start)
+            out["assigned"].append(vg)
+        except (ArrayError, subprocess.TimeoutExpired) as e:
+            out["failed"].append({"vg": vg, "error": str(e)})
+    drop_cache("array:")
+    return out
+
+
+@app.delete("/api/storages/{storeid}/snapshot-policies/{name}")
+def snapshot_policy_remove(storeid: str, name: str, s=Depends(admin)):
+    scfg = storage_cfg(s, storeid)
+    if not sv8.POLICY_RE.match(name) or name.startswith("predefinedsspolicy"):
+        err(400, "predefined policies of the array cannot be removed")
+    return array_call(sv8.remove_snapshot_policy, array_for(scfg), name)
 
 
 @app.post("/api/storages/{storeid}/vg/{vg}/policy")
@@ -2060,7 +2253,13 @@ async def vg_policy(storeid: str, vg: str, request: Request, s=Depends(admin)):
         pol = str(b.get("snapshot_policy") or "")
         if pol and not NAME_RE.match(pol):
             err(400, "invalid policy")
-        out["snapshot"] = array_call(sv8.set_snapshot_policy, a, vg, pol, bool(b.get("safeguarded")))
+        start = None
+        if pol and b.get("start"):
+            try:
+                start = sv8.array_start_time(a.show("lssystem") or {}, str(b.get("start")))
+            except (ArrayError, subprocess.TimeoutExpired) as e:
+                err(400, str(e))
+        out["snapshot"] = array_call(sv8.set_snapshot_policy, a, vg, pol, bool(b.get("safeguarded")), start)
     if "replication_policy" in b:
         pol = str(b.get("replication_policy") or "")
         if pol and not NAME_RE.match(pol):

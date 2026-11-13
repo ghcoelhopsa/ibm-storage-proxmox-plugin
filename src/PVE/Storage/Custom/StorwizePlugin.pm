@@ -25,7 +25,7 @@ use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
 
-our $VERSION = '0.3.3';
+our $VERSION = '0.3.4';
 
 # Storage API this module was validated against (PVE 9.2, libpve-storage-perl 9.1).
 my $TESTED_APIVER = 14;
@@ -300,6 +300,8 @@ sub trash_restore {
     my $dst = vdisk_name($scfg, $target);
     sw_run($scfg, $storeid, 'chvdisk', [name => $dst], $t->{name});
     map_vdisk($scfg, $storeid, $dst);
+    join_guest_vg($scfg, $storeid, $vmid, $dst)
+        if snapmode($scfg) eq 'volumegroup' && !$scfg->{'sw-volumegroup'} && !$scfg->{'sw-partition'};
     unlink uid_cache_file($storeid, $target);
     unlink run_dir($storeid) . "/status.json";
     return "$storeid:$target";
@@ -995,9 +997,128 @@ sub filesystem_path {
     die "storwize: filesystem_path() needs a storage id - use path()\n";
 }
 
+# ---- 8.5+ (sw-snapmode=volumegroup): read access to a snapshot ---------------------
+# Proxmox reads a snapshot through a block device (full clone from a snapshot). The array
+# gives one by a thinclone of the volume group snapshot: a new volume, created at once
+# without copying data, in its own volume group <prefix>-snapro-<vmid>-<epoch>-<id>. It is
+# removed when Proxmox deactivates the snapshot, and by the hourly cleanup after a day
+# (Proxmox does not deactivate the source when the VM is running).
+my $SNAPRO_KEEP = 86400;
+
+sub snapro_key {
+    my ($volname, $snap) = @_;
+    require Digest::MD5;
+    return substr(Digest::MD5::md5_hex("$volname\@$snap"), 0, 6);
+}
+
+sub snapro_file { my ($storeid, $key) = @_; return run_dir($storeid) . "/snapro-$key"; }
+
+sub snapro_find {
+    my ($scfg, $storeid, $volname, $snap) = @_;
+    my ($vmid) = $volname =~ m/^vm-(\d+)-/ or return undef;
+    my $p = sw_prefix($scfg);
+    my $key = snapro_key($volname, $snap);
+    my $rows = sw_list($scfg, $storeid, 'lsvolumegroup', [filtervalue => "name=$p-snapro-$vmid-*"]);
+    my ($g) = grep { ($_->{name} // '') =~ m/^\Q$p\E-snapro-\Q$vmid\E-\d+-\Q$key\E$/ } @$rows;
+    return undef if !$g;
+    my $vols = sw_list($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g->{name}"]);
+    return { vg => $g->{name}, vol => $vols->[0] };
+}
+
+sub snapro_wait_dev {
+    my ($scfg, $uid) = @_;
+    my $dev = uid_to_path($uid);
+    my $wwid = uid_to_wwid($uid);
+    my $deadline = time() + $DEV_WAIT;
+    my $n = 0;
+    while (!-b $dev) {
+        die "storwize: device $dev did not appear after ${DEV_WAIT}s\n" if time() > $deadline;
+        if ($n++ % 5 == 0) {
+            rescan_hosts($scfg);
+            udev_settle();
+            multipath_add($wwid);
+        }
+        sleep(1);
+    }
+    return $dev;
+}
+
+sub snapro_activate {
+    my ($class, $scfg, $storeid, $volname, $snap) = @_;
+    die "storwize: reading a snapshot needs sw-snapmode=volumegroup\n" if snapmode($scfg) ne 'volumegroup';
+    die "storwize: reading a snapshot is not supported over NVMe/TCP yet\n" if is_nvme($scfg);
+    my (undef, undef, $vmid) = $class->parse_volname($volname);
+    my $gvg = guest_vg_name($scfg, $vmid);
+    die "storwize: snapshot '$snap' not found in volume group '$gvg'\n"
+        if !vg_snapshot_exists($scfg, $storeid, $gvg, $snap);
+    my $key = snapro_key($volname, $snap);
+    my $sr = snapro_find($scfg, $storeid, $volname, $snap);
+    if (!$sr || !$sr->{vol}) {
+        sw_run($scfg, $storeid, 'rmvolumegroup', [], $sr->{vg}) if $sr;     # leftover, empty
+        my $vg = sw_prefix($scfg) . "-snapro-$vmid-" . time() . "-$key";
+        sw_run($scfg, $storeid, 'mkvolumegroup', [
+            type => 'thinclone', snapshot => $snap, fromsourcegroup => $gvg,
+            fromsourcevolumes => vdisk_name($scfg, $volname), name => $vg, pool => $scfg->{'sw-pool'},
+        ]);
+        $sr = snapro_find($scfg, $storeid, $volname, $snap)
+            or die "storwize: thinclone of '$volname' at '$snap' was not created\n";
+        die "storwize: thinclone group '$sr->{vg}' has no volume\n" if !$sr->{vol};
+        # the array names it <source>-<n>, i.e. like a disk of the guest: rename it out of the
+        # <prefix>-vm-* namespace so Proxmox never sees it (qm rescan would add it as unused)
+        sw_run($scfg, $storeid, 'chvdisk', [name => $sr->{vg}], $sr->{vol}{id});
+        $sr = snapro_find($scfg, $storeid, $volname, $snap);
+    }
+    my $v = $sr->{vol}{name};
+    my $maps = eval { sw_list($scfg, $storeid, 'lsvdiskhostmap', [], $v) } // [];
+    map_vdisk($scfg, $storeid, $v) if !@$maps;
+    my $info = vdisk_info($scfg, $storeid, $v) or die "storwize: '$v' not found\n";
+    file_set_contents(snapro_file($storeid, $key), "$info->{vdisk_UID}\n", 0600);
+    snapro_wait_dev($scfg, $info->{vdisk_UID});
+    return 1;
+}
+
+sub snapro_remove {
+    my ($scfg, $storeid, $vg, $vol) = @_;
+    if ($vol) {
+        eval { device_remove_local($vol->{vdisk_UID}) } if $vol->{vdisk_UID};
+        unmap_vdisk($scfg, $storeid, $vol->{name});
+        sw_run($scfg, $storeid, 'rmvdisk', [], $vol->{name});
+    }
+    sw_run($scfg, $storeid, 'rmvolumegroup', [], $vg);
+}
+
+sub snapro_deactivate {
+    my ($scfg, $storeid, $volname, $snap) = @_;
+    my $sr = snapro_find($scfg, $storeid, $volname, $snap) or return 1;
+    snapro_remove($scfg, $storeid, $sr->{vg}, $sr->{vol});
+    unlink snapro_file($storeid, snapro_key($volname, $snap));
+    return 1;
+}
+
+sub snapro_purge {
+    my ($scfg, $storeid) = @_;
+    my $p = sw_prefix($scfg);
+    my $rows = sw_list($scfg, $storeid, 'lsvolumegroup', [filtervalue => "name=$p-snapro-*"]);
+    for my $g (@$rows) {
+        my ($t) = ($g->{name} // '') =~ m/^\Q$p\E-snapro-\d+-(\d+)-[0-9a-f]{6}$/ or next;
+        next if time() - $t < $SNAPRO_KEEP;
+        eval {
+            my $vols = sw_list($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g->{name}"]);
+            snapro_remove($scfg, $storeid, $g->{name}, $vols->[0]);
+        };
+        warn "storwize: snapshot access '$g->{name}' kept: $@" if $@;
+    }
+}
+
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    die "storwize: direct access to snapshots is not supported\n" if defined($snapname);
+    if (defined($snapname)) {
+        my $f = snapro_file($storeid, snapro_key($volname, $snapname));
+        my ($uid) = (-f $f ? file_read_firstline($f) : '') =~ m/^([0-9A-Fa-f]{32})$/
+            or die "storwize: snapshot '$snapname' of '$volname' is not active\n";
+        my (undef, undef, $vmid) = $class->parse_volname($volname);
+        return wantarray ? (uid_to_path($uid), $vmid, 'images') : uid_to_path($uid);
+    }
     my ($vtype, undef, $vmid) = $class->parse_volname($volname);
     my $uid = volume_uid($scfg, $storeid, $volname);
     my $dev = volume_dev($scfg, $storeid, $volname, $uid);
@@ -1268,6 +1389,8 @@ sub status {
         file_set_contents($stamp, time() . "\n", 0600);
         eval { trash_purge($scfg, $storeid) };
         warn "storwize: trash: $@" if $@;
+        eval { snapro_purge($scfg, $storeid) } if snapmode($scfg) eq 'volumegroup';
+        warn "storwize: snapshot access: $@" if $@;
     }
     return ($c->{total}, $c->{free}, $c->{used}, 1);
 }
@@ -1284,6 +1407,7 @@ sub list_images {
     for my $r (@$rows) {
         my $name = $r->{name} // next;
         next if $name =~ m/_s_/;
+        next if ($r->{volume_group_name} // '') =~ m/^\Q$p\E-snapro-/;     # temporary snapshot access
         next if ($r->{mdisk_grp_name} // '') ne $scfg->{'sw-pool'}
             && ($r->{mdisk_grp_name} // '') ne 'many';
         my $volname = substr($name, length($p) + 1);
@@ -1297,6 +1421,14 @@ sub list_images {
         };
     }
     return $res;
+}
+
+sub join_guest_vg {
+    my ($scfg, $storeid, $vmid, $vname) = @_;
+    my $gvg = guest_vg_name($scfg, $vmid);
+    sw_run($scfg, $storeid, 'mkvolumegroup', [name => $gvg])
+        if !sw_show_opt($scfg, $storeid, 'lsvolumegroup', [], $gvg);
+    sw_run($scfg, $storeid, 'chvdisk', [volumegroup => $gvg], $vname);
 }
 
 sub alloc_image {
@@ -1331,7 +1463,9 @@ sub alloc_image {
         size => $bytes,
         unit => 'b',
     );
-    push @opts, (rsize => '2%', autoexpand => undef) if $scfg->{'sw-thin'} // 1;
+    # thin volume: no per-volume alert at 80% of its size (default), which fires for every guest
+    # that fills its disk; with autoexpand only the pool capacity matters, and the array warns on it
+    push @opts, (rsize => '2%', autoexpand => undef, warning => '0%') if $scfg->{'sw-thin'} // 1;
     my $part = $scfg->{'sw-partition'};
     if ($part) {
         # storage partition: the volume is born inside the guest's volume group (mkvolume
@@ -1359,10 +1493,7 @@ sub alloc_image {
         } elsif (my $vg = $scfg->{'sw-volumegroup'}) {
             sw_run($scfg, $storeid, 'chvdisk', [volumegroup => $vg], $vname);
         } elsif (snapmode($scfg) eq 'volumegroup') {
-            my $gvg = guest_vg_name($scfg, $vmid);
-            sw_run($scfg, $storeid, 'mkvolumegroup', [name => $gvg])
-                if !sw_show_opt($scfg, $storeid, 'lsvolumegroup', [], $gvg);
-            sw_run($scfg, $storeid, 'chvdisk', [volumegroup => $gvg], $vname);
+            join_guest_vg($scfg, $storeid, $vmid, $vname);
         }
         volume_uid($scfg, $storeid, $name, 1);
     };
@@ -1397,9 +1528,14 @@ sub free_image {
 
     wait_rollbacks_done($scfg, $storeid, "target_vdisk_name=$vname", "a rollback into '$vname'");
 
-    # volumes in a volume group (8.x replication, volume group snapshots, partitions) are not
-    # moved to the trash yet: they are deleted as before
-    my $trash = trash_days($scfg) > 0 && !($info->{volume_group_name} // '')
+    # A volume in the guest's own volume group (sw-snapmode=volumegroup) leaves the group and
+    # goes to the trash; the group's snapshots keep their copy of it. Volumes in other groups
+    # (replication, storage partitions, a fixed sw-volumegroup) are deleted as before.
+    my (undef, undef, $owner) = $class->parse_volname($volname);
+    my $vgn = $info->{volume_group_name} // '';
+    my $own_vg = $vgn ne '' && $vgn eq guest_vg_name($scfg, $owner) && !$scfg->{'sw-partition'}
+        && !replication_local_mode($scfg, $storeid, $vgn);
+    my $trash = trash_days($scfg) > 0 && ($vgn eq '' || $own_vg)
         ? trash_name($scfg, $volname, time()) : undef;
 
     # FlashCopy cascade: remove snapshots oldest first
@@ -1420,6 +1556,7 @@ sub free_image {
         warn "storwize: could not remove throttle $tid of '$vname': $@" if $@;
     }
     if ($trash) {
+        sw_run($scfg, $storeid, 'chvdisk', [novolumegroup => undef], $vname) if $own_vg;
         sw_run($scfg, $storeid, 'chvdisk', [name => $trash], $vname);
         print "storwize: '$vname' unmapped and moved to the trash as '$trash';"
             . " deleted after " . trash_days($scfg) . " day(s)\n";
@@ -1448,7 +1585,7 @@ sub free_image {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache, $hints) = @_;
 
-    die "storwize: snapshots cannot be activated directly\n" if defined($snapname);
+    return $class->snapro_activate($scfg, $storeid, $volname, $snapname) if defined($snapname);
 
     return nvme_activate($scfg, $storeid, $volname) if is_nvme($scfg);
 
@@ -1480,7 +1617,11 @@ sub activate_volume {
     return 1;
 }
 
-sub deactivate_volume { return 1; }
+sub deactivate_volume {
+    my ($class, $storeid, $scfg, $volname, $snapname, $cache, $hints) = @_;
+    snapro_deactivate($scfg, $storeid, $volname, $snapname) if defined($snapname);
+    return 1;
+}
 
 sub map_volume {
     my ($class, $storeid, $scfg, $volname, $snapname) = @_;
@@ -1569,6 +1710,8 @@ sub volume_has_feature {
         rename     => { current => 1 },
         sparseinit => { current => ($scfg->{'sw-thin'} // 1) ? 1 : 0 },
     };
+    # 8.5+ volume group snapshots can be read through a thinclone (full clone from a snapshot)
+    $features->{copy}{snap} = 1 if snapmode($scfg) eq 'volumegroup' && !is_nvme($scfg);
     my $key = defined($snapname) ? 'snap' : 'current';
     return $features->{$feature}->{$key} ? 1 : undef;
 }
@@ -1882,6 +2025,10 @@ sub volume_snapshot_delete {
     if (snapmode($scfg) eq 'volumegroup') {
         my (undef, undef, $vmid) = $class->parse_volname($volname);
         my $vg = guest_vg_name($scfg, $vmid);
+        # read access left behind by a clone from this snapshot (Proxmox does not deactivate the
+        # source of a clone while the VM runs)
+        eval { snapro_deactivate($scfg, $storeid, $volname, $snap) };
+        warn "storwize: snapshot access of '$volname' at '$snap' kept: $@" if $@;
         sw_run($scfg, $storeid, 'rmsnapshot', [snapshot => $snap, volumegroup => $vg])
             if vg_snapshot_exists($scfg, $storeid, $vg, $snap);
         return undef;

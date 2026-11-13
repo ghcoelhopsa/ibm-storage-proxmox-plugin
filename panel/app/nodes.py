@@ -88,6 +88,33 @@ def sfp(path):
             "bias_ma": round(u16(a2, 100) * 2 / 1000, 2), "tx_dbm": p(102), "rx_dbm": p(104),
             "tx_alarm_low": p(26), "tx_warn_low": p(30), "tx_warn_high": p(28), "tx_alarm_high": p(24),
             "rx_alarm_low": p(34), "rx_warn_low": p(38), "rx_warn_high": p(36), "rx_alarm_high": p(32)}
+def lpfc_xcvr(host):
+    # Emulex lpfc has no device/sfp file; it prints the SFF-8472 words in lpfc_xcvr_data instead
+    # (raw values, no alarm or warning limits)
+    t = rd("/sys/class/scsi_host/" + host + "/lpfc_xcvr_data")
+    if not t:
+        return None
+    f = {}
+    for l in t.splitlines():
+        if ":" in l:
+            k, v = l.split(":", 1)
+            f[k.strip()] = v.strip()
+    def raw(k):
+        v = f.get(k, "").split()[0] if f.get(k) else ""
+        try:
+            return int(v[1:], 16) if v.startswith("x") else None
+        except ValueError:
+            return None
+    tx, rx, tc, bias, vcc = raw("TxPower"), raw("RxPower"), raw("Temperature"), raw("TxBiasCurrent"), raw("Vcc")
+    if tx is None or rx is None:
+        return {"ddm": False}
+    wl = f.get("Wavelength", "").split()
+    return {"ddm": True, "vendor": f.get("VendorName", ""), "pn": f.get("VendorPN", ""), "sn": f.get("VendorSN", ""),
+            "wavelength_nm": int(wl[0]) if wl and wl[0].isdigit() else None,
+            "temp_c": round((tc - 65536 if tc > 32767 else tc) / 256, 1) if tc is not None else None,
+            "vcc_v": round(vcc / 10000, 2) if vcc is not None else None,
+            "bias_ma": round(bias * 2 / 1000, 2) if bias is not None else None,
+            "tx_dbm": dbm(tx / 10), "rx_dbm": dbm(rx / 10)}
 fc = []
 for h in sorted(glob.glob("/sys/class/fc_host/host*")):
     st = {}
@@ -100,7 +127,8 @@ for h in sorted(glob.glob("/sys/class/fc_host/host*")):
             pass
     fc.append({"host": os.path.basename(h), "wwpn": rd(h + "/port_name").replace("0x", "").upper(),
                "state": rd(h + "/port_state"), "speed": rd(h + "/speed"), "model": rd("/sys/class/scsi_host/" + os.path.basename(h) + "/model_name"),
-               "sfp": sfp(h + "/device/sfp"), "counters": st})
+               "fabric": rd(h + "/fabric_name").replace("0x", "").upper(),
+               "sfp": sfp(h + "/device/sfp") or lpfc_xcvr(os.path.basename(h)), "counters": st})
 iqn = ""
 for l in rd("/etc/iscsi/initiatorname.iscsi").splitlines():
     if l.startswith("InitiatorName="):

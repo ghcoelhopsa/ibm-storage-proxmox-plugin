@@ -244,9 +244,12 @@ function mount(el, node) { el.innerHTML = ""; el.appendChild(node); return node;
 window.__charts = [];
 function chartColors() { const cs = getComputedStyle(document.documentElement); return ["--sw-c1", "--sw-c2", "--sw-c3", "--sw-c4", "--sw-c5"].map(v => cs.getPropertyValue(v).trim()); }
 function niceMax(v) { if (v <= 0) return 1; const m = Math.pow(10, Math.floor(Math.log10(v))); const n = v / m; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * m; }
-function fmtVal(v, unit) { v = Number(v) || 0; return `${num(v, v < 10 && v % 1 ? 2 : v < 100 && v % 1 ? 1 : 0)}${unit ? " " + unit : ""}`; }
+// latency arrives in milliseconds (array and host); flash answers in fractions of a millisecond,
+// so it is always shown in microseconds
+function scaleUnit(v, unit) { return unit === "ms" ? [v * 1000, "µs"] : [v, unit]; }
+function fmtVal(v, unit) { v = Number(v) || 0; [v, unit] = scaleUnit(v, unit); return `${num(v, v < 10 && v % 1 ? 2 : v < 100 && v % 1 ? 1 : 0)}${unit ? " " + unit : ""}`; }
 function lineChart(el, { title, unit = "", series, hours }) {
-  const W = 640, H = 200, L = 44, R = 12, T = 10, B = 26;
+  const W = 640, H = 200, L = 44, R = 12, T = 20, B = 26;
   const draw = () => {
     const colors = chartColors();
     const all = series.flatMap(s => s.pts);
@@ -257,6 +260,7 @@ function lineChart(el, { title, unit = "", series, hours }) {
     const ymax = niceMax(Math.max(...all.map(p => p[1]), 0) * 1.1);
     const x = t => L + (W - L - R) * (t - t0) / Math.max(t1 - t0, 1), y = v => T + (H - T - B) * (1 - v / ymax);
     const ticks = [0, .25, .5, .75, 1].map(f => ymax * f);
+    const axU = unit === "ms" ? "µs" : unit, axF = axU === "µs" ? 1000 : 1;
     const xt = 5, xticks = Array.from({ length: xt }, (_, i) => t0 + (t1 - t0) * i / (xt - 1));
     const tf = t => { const d = new Date(t * 1000); return hours > 24 ? d.toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" }) + " " + d.toLocaleTimeString(LOCALE, { hour: "2-digit" }) + "h" : d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" }); };
     // break the line only on collection gaps: interval much longer than the normal pace of the series
@@ -275,7 +279,7 @@ function lineChart(el, { title, unit = "", series, hours }) {
     }).join("")).join("");
     el.innerHTML = `${head}<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)}">
       <g class="grid">${ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>`).join("")}</g>
-      <g class="axis">${ticks.map(v => `<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${fmtVal(v, "")}</text>`).join("")}
+      <g class="axis">${axU ? `<text x="${L - 8}" y="10" text-anchor="end">${esc(axU)}</text>` : ""}${ticks.map(v => `<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${fmtVal(v * axF, "")}</text>`).join("")}
       ${xticks.map((t, i) => `<text x="${x(t)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === xt - 1 ? "end" : "middle"}">${tf(t)}</text>`).join("")}</g>
       ${paths}<line class="rule" y1="${T}" y2="${H - B}" x1="-10" x2="-10"/>${series.map((s, i) => `<circle class="dot" r="4" cx="-10" cy="-10" fill="${colors[i % colors.length]}"/>`).join("")}</svg>
       <div class="legend">${series.map((s, i) => `<span><i style="background:${colors[i % colors.length]}"></i>${esc(s.label)}</span>`).join("")}</div>`;
@@ -519,7 +523,7 @@ async function pageDashboard() {
   const lastOf = pts => pts.length ? pts[pts.length - 1][1] : null;
   const nowSum = (k, avg) => { let a = 0, n = 0; sts.forEach(s => { if (s.stats && s.stats[k] != null && s.stats[k] !== "") { a += +s.stats[k]; n++; } }); return n ? (avg ? a / n : a) : null; };
   const spark = (label, k, unit, avg) => { const pts = series(k, avg), v = pts.length ? lastOf(pts) : nowSum(k, avg);
-    return `<div class="kpi"><div class="k">${esc(label)}</div><div class="v">${v == null ? "–" : fmtVal(v, "")}<small>${esc(unit)}</small></div>${sparkline(pts)}<div class="s">${pts.length > 1 ? "last hour" : "collecting history…"}</div></div>`; };
+    return `<div class="kpi"><div class="k">${esc(label)}</div><div class="v">${v == null ? "–" : fmtVal(scaleUnit(v, unit)[0], "")}<small>${esc(v == null ? unit : scaleUnit(v, unit)[1])}</small></div>${sparkline(pts)}<div class="s">${pts.length > 1 ? "last hour" : "collecting history…"}</div></div>`; };
   const overall = !allOk || errs ? "err" : alerts || warns ? "warn" : "ok";
 
   main.innerHTML = `<div class="page">
@@ -676,7 +680,7 @@ async function pageStorage(id, tab = "resumo") {
         ["CPU", `${esc(st.cpu_pc)}%`], ["Fibre Channel", fmtVal(st.fc_mb, "MB/s")], ["Write cache", `${esc(st.write_cache_pc)}%`]])}</section>
       <section class="tile"><h3 class="tile-title">Proxmox</h3>${sl([["Managed volumes", String(managed.filter(v => !v.name.includes("_s_")).length)], ["Snapshots (FlashCopy)", String(managed.filter(v => v.name.includes("_s_")).length)],
         ["Mapping", esc(c["sw-hostcluster"] ? "host cluster " + c["sw-hostcluster"] : "hosts " + (c["sw-hosts"] || ""))], ["Content", esc(c.content)],
-        ["Snapshots", (c["sw-snapmode"] === "volumegroup" ? `volume group ${tag("experimental", "warn")}` : "FlashCopy") + ((c["sw-consistency"] ?? 1) != 0 ? ` · ${tag("consistent across disks", "info")}` : " · per disk")], ...d.status.map(x => [`Node ${x.node}`, status(x.active ? "ok" : "err", x.active ? "active" : "inactive")])])}</section>
+        ["Snapshots", (c["sw-snapmode"] === "volumegroup" ? "volume group" : "FlashCopy") + ((c["sw-consistency"] ?? 1) != 0 ? ` · ${tag("consistent across disks", "info")}` : " · per disk")], ...d.status.map(x => [`Node ${x.node}`, status(x.active ? "ok" : "err", x.active ? "active" : "inactive")])])}</section>
       <section class="tile"><h3 class="tile-title">Pool QoS ${ME.admin && a.throttle_supported ? btn("Edit", "ghost", 'id="pool-qos"', "edit", "sm") : ""}</h3>
         ${!a.throttle_supported ? `<p class="muted">This firmware has no QoS (mkthrottle needs 7.7+).</p>` : sl([["Maximum IOPS", a.pool_limit?.iops ? num(a.pool_limit.iops) : "no limit"], ["Maximum throughput", a.pool_limit?.mbps ? `${num(a.pool_limit.mbps)} MB/s` : "no limit"],
           ["Volumes with a limit", String(a.throttles.filter(t => t.throttle_type === "vdisk").length)]])}
@@ -798,6 +802,7 @@ async function trashTab(el, id) {
 function optKind(v, sfp, dir) {
   if (v == null || !sfp || !sfp.ddm) return "neutral";
   const lo_a = sfp[`${dir}_alarm_low`], lo_w = sfp[`${dir}_warn_low`], hi_w = sfp[`${dir}_warn_high`], hi_a = sfp[`${dir}_alarm_high`];
+  if (lo_a == null) return "neutral";        // module limits not reported (Emulex)
   if (v <= lo_a || (hi_a > -40 && v >= hi_a)) return "err";
   if (v <= lo_w || (hi_w > -40 && v >= hi_w)) return "warn";
   return "ok";
@@ -806,7 +811,8 @@ function optCell(sfp, dir) {
   if (!sfp) return `<span class="muted">no data</span>`;
   if (!sfp.ddm) return `<span class="muted">SFP without DDM</span>`;
   const v = sfp[`${dir}_dbm`], k = optKind(v, sfp, dir);
-  return `<span title="warning below ${num(sfp[dir + "_warn_low"], 1)} dBm · alarm below ${num(sfp[dir + "_alarm_low"], 1)} dBm">${status(k, `${num(v, 2)} dBm`)}</span>`;
+  const tip = sfp[dir + "_alarm_low"] == null ? "the HBA driver does not report the module limits" : `warning below ${num(sfp[dir + "_warn_low"], 1)} dBm · alarm below ${num(sfp[dir + "_alarm_low"], 1)} dBm`;
+  return `<span title="${esc(tip)}">${status(k, `${num(v, 2)} dBm`)}</span>`;
 }
 function errCell(deltas, labels) {
   if (!deltas || !Object.keys(deltas).length) return `<span class="muted" title="the panel starts measuring from now">measuring…</span>`;
@@ -1082,7 +1088,9 @@ async function pageVMs() {
       { t: "State", key: "status", render: v => v.status === "running" ? status("ok", "Running") : status("neutral", v.status === "stopped" ? "Stopped" : v.status) },
       { t: "Node", key: "node" },
       { t: "Capacity", num: 1, sortVal: v => v.d.reduce((a, d) => a + (d.capacity || 0), 0), render: v => bytes(v.d.reduce((a, d) => a + (d.capacity || 0), 0)) },
-      { t: "Snapshots", num: 1, sortVal: v => v.snapshots.length, render: v => String(v.snapshots.length) },
+      { t: "Snapshots", num: 1, sortVal: v => v.snapshots.length + (v.array_snapshots || []).length,
+        render: v => { const a = v.array_snapshots || [], sg = a.filter(x => x.safeguarded).length;
+          return `${v.snapshots.length}${a.length ? ` <span class="helper">+ ${a.length} ${esc(tr("on the array"))}</span>` : ""}${sg ? " " + tag(`${sg} Safeguarded`, "purple") : ""}`; } },
       { t: "IOPS now", num: 1, sortVal: v => v.d.reduce((a, d) => a + (d.perf_now ? d.perf_now.r_iops + d.perf_now.w_iops : 0), 0),
         render: v => { const n = v.d.reduce((a, d) => a + (d.perf_now ? d.perf_now.r_iops + d.perf_now.w_iops : 0), 0); return v.d.some(d => d.perf_now) ? num(n, 0) : `<span class="muted">–</span>`; } },
       { t: "Snapshot", text: v => hasAgent(v) ? "agent" : "", render: v => v.type !== "qemu" ? "<span class='muted'>–</span>" : hasAgent(v) ? status("ok", "guest agent") : `<span title="no qemu-guest-agent: snapshot without fs-freeze">${status("warn", "crash-consistent")}</span>` },
@@ -1098,7 +1106,13 @@ async function pageVMs() {
       <section><div class="sub-h"><span class="cds--label">Snapshots (${v.snapshots.length})</span>${btn("Take snapshot", "ghost", `data-newsnap="${v.vmid}"`, "camera", "sm")}</div>
         ${v.snapshots.length ? `<table class="mini"><thead><tr><th>Name</th><th>Created</th><th>Description</th><th></th></tr></thead><tbody>
         ${v.snapshots.slice().sort((a, b) => (b.snaptime || 0) - (a.snaptime || 0)).map(s => `<tr><td><b>${esc(s.name)}</b>${s.vmstate ? " " + tag("with RAM", "purple") : ""}</td><td>${esc(dt(s.snaptime))}</td><td class="muted">${esc(s.description || "")}</td>
-          <td class="act">${ovfButton(`data-snapm="${v.vmid}" data-snap="${esc(s.name)}"`, `Actions for snapshot ${s.name}`)}</td></tr>`).join("")}</tbody></table>` : `<div class="mini-empty">No snapshots for this VM.</div>`}</section>`,
+          <td class="act">${ovfButton(`data-snapm="${v.vmid}" data-snap="${esc(s.name)}"`, `Actions for snapshot ${s.name}`)}</td></tr>`).join("")}</tbody></table>` : `<div class="mini-empty">No snapshots for this VM.</div>`}</section>
+      ${(v.array_snapshots || []).length || (v.array_policies || []).length ? `<section><div class="sub-h"><span class="cds--label">${esc(tr("Array snapshots (volume group)"))} (${(v.array_snapshots || []).length})</span>
+        ${(v.array_policies || []).map(p => `<span class="helper">${esc(tr("Policy"))} ${tag(p.policy, "info")}${p.safeguarded ? " " + tag("Safeguarded", "purple") : ""}${p.next ? ` · ${esc(tr("next"))}: ${esc(fcTime(p.next))}` : ""}</span>`).join(" ")}</div>
+        ${(v.array_snapshots || []).length ? `<table class="mini"><thead><tr><th>Name</th><th>Created</th><th>Expires</th><th>Type</th><th></th></tr></thead><tbody>
+        ${v.array_snapshots.map((s, i) => `<tr><td class="mono">${esc(s.name)}</td><td>${esc(fcTime(s.time))}</td><td>${s.expires ? esc(fcTime(s.expires)) : `<span class="muted">–</span>`}</td>
+          <td>${s.safeguarded ? tag("Safeguarded", "purple", "Immutable until it expires") : tag("Snapshot", "neutral")} ${s.auto ? tag("policy", "info") : ""}${s.state && s.state !== "active" ? " " + tag(s.state, "warn") : ""}${s.anomaly && !/^(none|no|normal)$/i.test(s.anomaly) ? " " + tag(s.anomaly, "red", "Anomaly detection of the array (possible ransomware)") : ""}</td>
+          <td class="act">${ME.admin && v.type === "qemu" ? ovfButton(`data-asnap="${v.vmid}" data-i="${i}"`, `Actions for snapshot ${s.name}`) : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="mini-empty">${esc(tr("No snapshots on the array yet."))}</div>`}</section>` : ""}`,
   }));
   const bind = () => {
     $$("[data-vm]").forEach(b => b.onclick = () => {
@@ -1123,6 +1137,20 @@ async function pageVMs() {
     $$("[data-newsnap]").forEach(b => b.onclick = () => snapCreate(rows.find(x => x.vmid === +b.dataset.newsnap)));
     $$("[data-resize]").forEach(b => b.onclick = () => resizeFlow(+b.dataset.resize, b.dataset.disk, +b.dataset.fc, +b.dataset.cap));
     $$("[data-limits]").forEach(b => b.onclick = () => { const v = rows.find(x => x.vmid === +b.dataset.limits); limitsFlow(v, v.d.find(d => d.key === b.dataset.disk)); });
+    $$("[data-asnap]").forEach(b => b.onclick = () => {
+      const v = rows.find(x => x.vmid === +b.dataset.asnap), s = v.array_snapshots[+b.dataset.i];
+      const base = `/storages/${encodeURIComponent(s.storage)}/vg/${encodeURIComponent(s.vg)}/snapshots/${encodeURIComponent(s.name)}`;
+      openMenu(b, [
+        { label: "New VM from this snapshot…", icon: "copy", run: () => vgNewVmFlow(`${base}/newvm`, { name: s.vg, vmid: v.vmid, vm_name: v.name, vm_node: v.node }, s.name) },
+        { label: "Restore over this VM…", icon: "undo", run: async () => {
+          if (v.status !== "stopped") return toast("warn", "Shut down the VM first", "Restoring overwrites all its disks with the snapshot content.");
+          if (await confirmDialog({ label: `VM ${v.vmid}`, title: `Restore “${s.name}”?`, danger: true, ok: "Restore",
+            body: `<p>All disks of VM ${v.vmid} on ${esc(s.storage)} go back to ${esc(fcTime(s.time))}. Everything written after that is lost.</p><p class="helper">${esc(tr("To keep the current state, use New VM from this snapshot instead."))}</p>` })) {
+            try { await api("POST", `${base}/restore`); toast("ok", "Snapshot restored", `VM ${v.vmid}`); main.dataset.route = ""; route(); }
+            catch (e) { toast("err", "The operation failed", e.message); }
+          } } },
+      ]);
+    });
     $$("[data-snapm]").forEach(b => b.onclick = () => {
       const vmid = +b.dataset.snapm, n = b.dataset.snap;
       openMenu(b, [{ label: "Restore (rollback)", icon: "undo", run: () => snapRollback(vmid, n, (rows.find(x => x.vmid === vmid) || {}).status === "running") }, "-", { label: "Delete snapshot", icon: "trash-can", danger: true, run: () => snapDelete(vmid, n) }]);
@@ -1470,23 +1498,34 @@ async function protectionTab(el, id) {
   const act = async (msg, fn) => { try { await fn(); toast("ok", msg); reload(); } catch (e) { toast("err", "The operation failed", e.message); } };
   const snapRows = g => g.snapshots.length ? `<table class="mini"><thead><tr><th>Snapshot</th><th>Created</th><th>Expires</th><th>Type</th><th></th></tr></thead><tbody>${g.snapshots.map(s => `<tr>
       <td class="mono">${esc(s.name)}</td><td>${esc(fcTime(s.time))}</td><td>${s.expires ? esc(fcTime(s.expires)) : `<span class="muted">–</span>`}</td>
-      <td>${s.safeguarded ? tag("Safeguarded", "purple", "Immutable until it expires") : tag("Snapshot", "neutral")} ${s.auto ? tag("policy", "info") : ""}${s.state && s.state !== "active" ? " " + tag(s.state, "warn") : ""}</td>
-      <td class="act nowrap">${ME.admin ? btn("Restore", "ghost", `data-sr="${esc(g.name)}|${esc(s.name)}"`, "undo", "sm") + (s.safeguarded ? "" : btn("Delete", "ghost", `data-sd="${esc(g.name)}|${esc(s.name)}"`, "trash-can", "sm")) : ""}</td></tr>`).join("")}</tbody></table>`
+      <td>${s.safeguarded ? tag("Safeguarded", "purple", "Immutable until it expires") : tag("Snapshot", "neutral")} ${s.auto ? tag("policy", "info") : ""}${s.state && s.state !== "active" ? " " + tag(s.state, "warn") : ""}${s.anomaly && !/^(none|no|normal)$/i.test(s.anomaly) ? " " + tag(s.anomaly, "red", "Anomaly detection of the array (possible ransomware)") : ""}</td>
+      <td class="act nowrap">${ME.admin ? (P.snapmode === "volumegroup" && C.vg_clone && g.vm_name != null ? btn("New VM", "ghost", `data-sn="${esc(g.name)}|${esc(s.name)}"`, "copy", "sm") : "") + btn("Restore", "ghost", `data-sr="${esc(g.name)}|${esc(s.name)}"`, "undo", "sm") + (s.safeguarded ? "" : btn("Delete", "ghost", `data-sd="${esc(g.name)}|${esc(s.name)}"`, "trash-can", "sm")) : ""}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">No snapshots in this volume group.</p>`;
-  el.innerHTML = `${notification("info", "Feature not yet validated on hardware", "The commands follow the Storage Virtualize 8.5.2+ documentation; test with a lab VM before using in production.")}
-    ${P.partition ? `<section class="tile" style="margin-bottom:1rem"><h3 class="tile-title">Storage partition <span class="mono">${esc(P.partition.name)}</span></h3>${P.partition.missing ? notification("err", "The partition was not found on the array") : sl([
+  el.innerHTML = `${P.partition ? `<section class="tile" style="margin-bottom:1rem"><h3 class="tile-title">Storage partition <span class="mono">${esc(P.partition.name)}</span></h3>${P.partition.missing ? notification("err", "The partition was not found on the array") : sl([
         ["Partition replication", P.partition.replication_policy ? `${tag(P.partition.replication_policy, "info")} <span class="helper">${esc(P.partition.ha_status)} ${esc(P.partition.link_status)}</span>` : `<span class="muted">none</span>`],
         P.partition.active_management ? ["Active management system", `<b data-noi18n>${esc(P.partition.active_management)}</b>`] : null,
         ["Hosts / volume groups", `${esc(P.partition.hosts ?? "–")} / ${esc(P.partition.volume_groups ?? "–")}`]])}
       ${C.readonly_recovery ? `<p class="helper" style="margin-top:.75rem">Firmware 9.1+: inside a partition, the recovery copy stays online and read-only; it accepts writes after a failover or during a DR test.</p>` : ""}</section>` : ""}
-    ${P.snapmode !== "volumegroup" ? notification("warn", "This storage uses FlashCopy as its snapshot engine", "Per-VM volume groups are only created when the storage is registered with the “volume group” engine. Safeguarded snapshots and policy-based replication depend on them.") : ""}<div id="pt"></div>`;
+    ${P.snapmode !== "volumegroup" ? notification("warn", "This storage uses FlashCopy as its snapshot engine", "Per-VM volume groups are only created when the storage is registered with the “volume group” engine. Safeguarded snapshots and policy-based replication depend on them.") : ""}<div id="pp" style="margin-bottom:1.5rem"></div><div id="pt"></div>`;
+  const every = s => `${tr("every")} ${s.interval} ${tr(s.unit + (+s.interval > 1 ? "s" : ""))}`;
+  mount($("#pp", el), dataTable({
+    title: "Snapshot policies", desc: `Schedules kept by the array itself: it takes the snapshots and deletes them when the retention ends. Times follow the array clock (${esc(P.time_zone || "UTC")}).`,
+    actions: ME.admin && C.vg_snapshot ? btn("Create policy", "primary", `data-pnew`, "add", "sm") : "",
+    columns: [
+      { t: "Policy", key: "name", render: p => `<b>${esc(p.name)}</b> ${p.predefined ? tag("array default", "neutral") : ""}` },
+      { t: "Frequency", text: p => p.schedules.filter(x => x.type === "localsnapshot").map(every).join(", "), render: p => esc(p.schedules.filter(x => x.type === "localsnapshot").map(every).join(" · ") || "–") },
+      { t: "Kept for", text: p => p.schedules.map(x => x.retention_days).join(","), render: p => esc(p.schedules.filter(x => x.type === "localsnapshot").map(x => `${x.retention_days} ${tr(+x.retention_days > 1 ? "days" : "day")}`).join(" · ") || "–") },
+      { t: "Volume groups", num: 1, key: "volume_groups" },
+      { act: 1, render: p => ME.admin && !p.predefined ? btn("", "ghost", `data-pdel="${esc(p.name)}" title="${esc(tr("Delete policy"))}"`, "trash-can", "sm") : "" },
+    ], rows: (P.snapshot_policies || []).map(p => ({ ...p, __key: p.name })), search: false, empty: "No snapshot policies on the array.",
+  }));
   mount($("#pt", el), dataTable({
     title: "VM volume groups", desc: "One volume group per VM: snapshots (including Safeguarded) and replication apply to all of the VM's disks at once.",
     columns: [
       { t: "VM", sortVal: g => g.vmid, text: g => `${g.vmid} ${g.vm_name || ""}`, render: g => `<b>${g.vmid}</b> ${esc(g.vm_name || "")}${g.vm_name == null ? ` ${tag("no VM at this site", "warn")}` : ""}` },
       { t: "Volume group", key: "name", render: g => `<span class="mono">${esc(g.name)}</span>` },
       { t: "Volumes", num: 1, key: "volumes" },
-      { t: "Snapshot policy", text: g => g.snapshot_policy, render: g => g.snapshot_policy ? `${tag(g.snapshot_policy, "info")} ${g.policy_safeguarded ? tag("Safeguarded", "purple") : ""} ${g.policy_suspended ? tag("suspended", "warn") : ""}` : `<span class="muted">–</span>` },
+      { t: "Snapshot policy", text: g => g.snapshot_policy, render: g => g.snapshot_policy ? `${tag(g.snapshot_policy, "info")} ${g.policy_safeguarded ? tag("Safeguarded", "purple") : ""} ${g.policy_suspended ? tag("suspended", "warn") : ""}${g.policy_next ? `<div class="helper">${esc(tr("next"))}: ${esc(fcTime(g.policy_next))}</div>` : ""}` : `<span class="muted">–</span>` },
       { t: "Snapshots", num: 1, sortVal: g => g.snapshots.length, render: g => `${g.snapshots.length}${g.snapshots.some(s => s.safeguarded) ? ` <span class="helper">(${g.snapshots.filter(s => s.safeguarded).length} Safeguarded)</span>` : ""}` },
       { t: "Replication", text: g => g.replication ? g.replication.local_mode : "", render: g => replCell(g.replication) },
       { act: 1, render: g => ME.admin ? ovfButton(`data-pg="${esc(g.name)}"`, `Actions for ${g.name}`) : "" },
@@ -1494,8 +1533,18 @@ async function protectionTab(el, id) {
   }));
   const G = n => P.groups.find(g => g.name === n);
   el.addEventListener("click", async e => {
-    const pg = e.target.closest("[data-pg]"), sr = e.target.closest("[data-sr]"), sd = e.target.closest("[data-sd]");
-    if (sr) {
+    const pg = e.target.closest("[data-pg]"), sr = e.target.closest("[data-sr]"), sd = e.target.closest("[data-sd]"), sn = e.target.closest("[data-sn]");
+    const pnew = e.target.closest("[data-pnew]"), pdel = e.target.closest("[data-pdel]");
+    if (pnew) {
+      policyCreateFlow(`/storages/${sid}`, P, reload);
+    } else if (pdel) {
+      const name = pdel.dataset.pdel, pol = (P.snapshot_policies || []).find(p => p.name === name);
+      if (await confirmDialog({ label: name, title: `Delete policy “${name}”?`, danger: true, ok: "Delete", body: `<p>The array stops taking snapshots with this policy${pol && pol.volume_groups ? ` and removes it from ${pol.volume_groups} volume group(s)` : ""}. Snapshots already taken stay until they expire; Safeguarded ones cannot be deleted before that.</p>` }))
+        act("Policy deleted", () => api("DELETE", `/storages/${sid}/snapshot-policies/${encodeURIComponent(name)}`));
+    } else if (sn) {
+      const [vg, snap] = sn.dataset.sn.split("|");
+      vgNewVmFlow(`/storages/${sid}/vg/${encodeURIComponent(vg)}/snapshots/${encodeURIComponent(snap)}/newvm`, G(vg), snap);
+    } else if (sr) {
       const [vg, sn] = sr.dataset.sr.split("|");
       if (await confirmDialog({ label: vg, title: `Restore “${sn}”?`, danger: true, ok: "Restore", body: `<p>All disks in the volume group go back to the state of this snapshot. The VM must be powered off.</p><p class="helper">On the array: restorefromsnapshot.</p>` }))
         act("Snapshot restored", () => api("POST", `/storages/${sid}/vg/${encodeURIComponent(vg)}/snapshots/${encodeURIComponent(sn)}/restore`));
@@ -1519,6 +1568,39 @@ async function protectionTab(el, id) {
     }
   });
 }
+async function vgNewVmFlow(url, g, snap) {
+  const [nid, nodes] = await Promise.all([api("GET", "/nextid"), api("GET", "/nodes")]);
+  const online = nodes.filter(n => n.online), here = online.find(n => n.node === g.vm_node) || online[0];
+  const helpT = {
+    thinclone: "Ready at once and takes no space up front: the new VM shares the unchanged data with the snapshot. The array keeps the snapshot while this VM exists, even if it is deleted. Good for tests, DR drills and quick copies.",
+    clone: "Ready at once: the array copies the data in the background, without going through the network or the nodes. When the copy ends the VM no longer depends on the snapshot. Good for a permanent copy.",
+  };
+  let kind = "thinclone";
+  await modal({ label: `${g.name} · ${snap}`, title: "New VM from snapshot", size: "md",
+    body: `<div class="form-stack">
+      <div><span class="cds--label" style="display:block">Type</span>${contentSwitcher("nv-t", [["thinclone", "Thinclone"], ["clone", "Clone"]], kind)}
+        <p class="helper" id="nv-h" style="margin-top:.5rem">${esc(helpT[kind])}</p></div>
+      ${textInput("nv-id", "VMID", `type="number" min="100" value="${esc(nid.vmid)}"`)}
+      ${textInput("nv-n", "Name", `value="${esc(((g.vm_name || "vm" + g.vmid) + "-" + snap).replace(/[^A-Za-z0-9.-]/g, "-").slice(0, 63))}" maxlength="63" autocapitalize="off" spellcheck="false"`)}
+      ${selectInput("nv-node", "Node", online.map(n => ({ v: n.node, t: n.node, sel: here && n.node === here.node })))}
+      ${checkbox("nv-s", "Start the VM when it is ready")}</div>
+      ${notification("info", "Network addresses", "The new VM gets new MAC addresses, but keeps the same IP configuration inside the guest and the same cloud-init settings. Change them before starting it next to the original.", true)}`,
+    onOpen: root => $$("#nv-t button", root).forEach(b => b.onclick = () => {
+      kind = b.dataset.v;
+      $$("#nv-t button", root).forEach(x => { const on = x === b; x.classList.toggle("cds--content-switcher--selected", on); x.setAttribute("aria-selected", on); });
+      $("#nv-h", root).textContent = tr(helpT[kind]);
+    }),
+    buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Create VM", kind: "primary" }],
+    onButton: async (id, root) => {
+      if (id !== "go") return false;
+      const body = { type: kind, vmid: +$("#nv-id").value, name: $("#nv-n").value.trim(), node: $("#nv-node").value, start: $("#nv-s").checked };
+      try {
+        const r = await busy($("[data-b=go]", root), () => api("POST", url, body));
+        toast("ok", `VM ${r.vmid} created`, r.skipped.length ? `${tr("Left out (other storages):")} ${r.skipped.join(", ")}` : "");
+        main.dataset.route = ""; route(); return false;
+      } catch (e) { toast("err", "Could not create the VM", e.message); return true; }
+    } });
+}
 async function vgSnapFlow(vgp, g, C, done) {
   const def = "snap" + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
   await modal({ label: g.name, title: "Take snapshot", size: "sm",
@@ -1532,17 +1614,43 @@ async function vgSnapFlow(vgp, g, C, done) {
       catch (e) { toast("err", "Could not create the snapshot", e.message); return true; }
     } });
 }
+async function policyCreateFlow(base, P, done) {
+  const groups = P.groups.filter(g => !g.snapshot_policy);
+  await modal({ label: "Snapshot policy", title: "Create policy", size: "md",
+    body: `<div class="form-stack">${textInput("pc-n", "Name", `maxlength="63" placeholder="vm-hourly-7d" autocapitalize="off" spellcheck="false"`)}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">${textInput("pc-i", "Every", `type="number" min="1" value="4"`)}
+        ${selectInput("pc-u", "Unit", [["hour", "hours"], ["day", "days"], ["week", "weeks"], ["month", "months"], ["minute", "minutes (60 or more)"]].map(([v, t]) => ({ v, t, sel: v === "hour" })))}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">${textInput("pc-r", "Keep for (days)", `type="number" min="1" max="3650" value="7"`)}
+        ${textInput("pc-s", "First snapshot at (HH:MM, optional)", `placeholder="22:00" maxlength="5"`, `${esc(tr("Array clock"))}: ${esc(P.time_zone || "UTC")}`)}</div>
+      ${P.capabilities.safeguarded ? checkbox("pc-sg", "Safeguarded: the snapshots are immutable until they expire", true) : ""}
+      <div><span class="cds--label" style="display:block">${esc(tr("Apply to the VMs"))}</span>${groups.length ? `<div class="pc-vms" style="max-height:12rem;overflow:auto">${groups.map(g => checkbox(`pc-g-${g.vmid}`, `<b>${g.vmid}</b> ${esc(g.vm_name || "")} <span class="helper mono">${esc(g.name)}</span>`, false, `data-vg="${esc(g.name)}"`)).join("")}</div>` : `<p class="helper">${esc(tr("Every VM volume group already has a policy."))}</p>`}</div></div>
+      ${notification("warn", "Safeguarded snapshots", "Only an array Security Administrator can delete them before they expire, and they count against the pool capacity. Size the retention with that in mind.", true)}`,
+    buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Create", kind: "primary" }],
+    onButton: async (id, root) => {
+      if (id !== "go") return false;
+      const body = { name: $("#pc-n").value.trim(), interval: +$("#pc-i").value, unit: $("#pc-u").value, retention_days: +$("#pc-r").value,
+        start: $("#pc-s").value.trim() || null, safeguarded: !!($("#pc-sg") && $("#pc-sg").checked),
+        volume_groups: $$("[data-vg]", root).filter(x => x.checked).map(x => x.dataset.vg) };
+      try {
+        const r = await busy($("[data-b=go]", root), () => api("POST", `${base}/snapshot-policies`, body));
+        toast(r.failed.length ? "warn" : "ok", "Policy created", r.assigned.length ? `${tr("Applied to")} ${r.assigned.join(", ")}` : "");
+        r.failed.forEach(f => toast("err", f.vg, f.error));
+        done(); return false;
+      } catch (e) { toast("err", "Could not create the policy", e.message); return true; }
+    } });
+}
 async function vgPolicyFlow(vgp, g, P, kind, done) {
   const snap = kind === "snapshot", list = snap ? P.snapshot_policies : P.replication_policies, cur = snap ? g.snapshot_policy : (g.replication && g.replication.policy) || "";
   const opts = [{ v: "", t: "None" }].concat(list.map(p => ({ v: p.name, t: p.name, sel: p.name === cur })));
   await modal({ label: g.name, title: snap ? "Snapshot policy" : "Replication policy", size: "sm",
     body: `<div class="form-stack">${selectInput("vp-p", "Policy", opts, list.length ? "" : "No policy exists on the array. Create the policy in the array GUI and come back.")}
-      ${snap && P.capabilities.safeguarded ? checkbox("vp-s", "Create the snapshots as Safeguarded", g.policy_safeguarded) : ""}</div>
+      ${snap && P.capabilities.safeguarded ? checkbox("vp-s", "Create the snapshots as Safeguarded", g.policy_safeguarded) : ""}
+      ${snap ? textInput("vp-t", "First snapshot at (HH:MM, optional)", `placeholder="22:00" maxlength="5"`, `${esc(tr("Array clock"))}: ${esc(P.time_zone || "UTC")}`) : ""}</div>
       ${snap ? "" : `<p class="helper">When the policy is assigned, the array creates and synchronizes the copy on the other system. When it is removed, the recovery copy is deleted.</p>`}`,
     buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Apply", kind: "primary" }],
     onButton: async (id, root) => {
       if (id !== "go") return false;
-      const body = snap ? { snapshot_policy: $("#vp-p").value, safeguarded: !!($("#vp-s") && $("#vp-s").checked) } : { replication_policy: $("#vp-p").value };
+      const body = snap ? { snapshot_policy: $("#vp-p").value, safeguarded: !!($("#vp-s") && $("#vp-s").checked), start: ($("#vp-t") && $("#vp-t").value.trim()) || null } : { replication_policy: $("#vp-p").value };
       try { await busy($("[data-b=go]", root), () => api("POST", `${vgp}/policy`, body)); toast("ok", "Policy applied"); done(); return false; }
       catch (e) { toast("err", "Could not apply the policy", e.message); return true; }
     } });
