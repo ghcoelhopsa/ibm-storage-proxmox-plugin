@@ -23,7 +23,7 @@ It has three parts:
 
 | | |
 |---|---|
-| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta/ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
+| **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.7-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.7-beta/ibm-storage-plugin-proxmox-panel-0.3.7-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
 | **All releases** | [Releases page](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases), with the checksum of each image |
 | **Source** | `git clone https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin.git` |
 | **Runs on** | Proxmox VE 9.x (tested on 9.2, single node and two-node cluster) |
@@ -135,8 +135,8 @@ around it.
 on the Proxmox node:
 
 ```bash
-R=https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.6-beta
-I=ibm-storage-plugin-proxmox-panel-0.3.6-beta.tar.zst
+R=https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.7-beta
+I=ibm-storage-plugin-proxmox-panel-0.3.7-beta.tar.zst
 wget $R/$I $R/$I.sig https://raw.githubusercontent.com/ghcoelhopsa/ibm-storage-proxmox-plugin/main/panel/app/release-key.pem
 openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in $I -sigfile $I.sig   # must print "Signature Verified Successfully"
 pct restore <ctid> $I --storage <storage> --unprivileged 1 --unique 1
