@@ -1,0 +1,7 @@
+[Unit]
+Description=IBM Storage Plugin Proxmox - install a panel update
+
+[Service]
+Type=oneshot
+ExecStart=/opt/swpanel/update.sh
+TimeoutStartSec=15min

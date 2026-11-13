@@ -13,3 +13,4 @@ __pycache__/
 
 # Carbon CSS and IBM Plex fonts, downloaded by panel/deploy.sh
 panel/vendor-cache/
+dist/

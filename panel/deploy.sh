@@ -12,39 +12,12 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-P="$REPO/panel"
-VENDOR="${VENDOR:-$P/vendor-cache}"
-CARBON_VER=1.118.0; PLEX_SANS=1.1.0; PLEX_MONO=2.5.0
 
 pct status "$CT" | grep -q running || { echo "CT $CT is not running" >&2; exit 1; }
 
-# --- Carbon and IBM Plex assets (downloaded once on the node, served locally) ---
-if [ ! -f "$VENDOR/carbon.min.css" ]; then
-    mkdir -p "$VENDOR/fonts"; tmp=$(mktemp -d)
-    curl -fsSL "https://registry.npmjs.org/@carbon/styles/-/styles-$CARBON_VER.tgz" | tar xz -C "$tmp"
-    # drop the @font-face rules that point to the IBM CDN (we use the local fonts)
-    python3 -I -c 'import re,sys; s=open(sys.argv[1]).read(); open(sys.argv[2],"w").write(re.sub(r"@font-face\{[^}]*\}","",s))' \
-        "$tmp/package/css/styles.min.css" "$VENDOR/carbon.min.css"
-    mkdir -p "$tmp/s" "$tmp/m"
-    curl -fsSL "https://registry.npmjs.org/@ibm/plex-sans/-/plex-sans-$PLEX_SANS.tgz" | tar xz -C "$tmp/s"
-    curl -fsSL "https://registry.npmjs.org/@ibm/plex-mono/-/plex-mono-$PLEX_MONO.tgz" | tar xz -C "$tmp/m"
-    for w in Light Regular SemiBold; do cp "$tmp/s/package/fonts/complete/woff2/IBMPlexSans-$w.woff2" "$VENDOR/fonts/"; done
-    cp "$tmp/m/package/fonts/complete/woff2/IBMPlexMono-Regular.woff2" "$VENDOR/fonts/"
-    cp "$tmp/package/LICENSE" "$VENDOR/LICENSE-carbon" 2>/dev/null || true
-    rm -rf "$tmp"
-fi
-
-# --- panel package ---
+# --- panel package (same file the in-panel update installs) ---
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage/opt/swpanel/assets" "$stage/opt/swpanel/static/vendor"
-cp -r "$P/app" "$stage/opt/swpanel/"
-cp "$P/setup-issue.sh" "$stage/opt/swpanel/"
-cp -r "$P/static/." "$stage/opt/swpanel/static/"
-cp -r "$VENDOR/." "$stage/opt/swpanel/static/vendor/"
-cp "$REPO/src/PVE/Storage/Custom/StorwizePlugin.pm" "$REPO/src/PVE/Storage/Custom/FlashSystemPlugin.pm" "$REPO/bin/pve-ibm-storage" "$stage/opt/swpanel/assets/"
-cp "$REPO/cbt/cbt_backup.py" "$REPO/cbt/cbt_job.py" "$REPO/cbt/cbt_sched.py" "$REPO/cbt/sw-snap.pl" "$stage/opt/swpanel/assets/"
-find "$stage" -name __pycache__ -prune -exec rm -rf {} +
-tar -C "$stage" -czf "$stage/panel.tgz" opt
+"$REPO/scripts/build-panel-package.sh" "$stage/panel.tgz"
 pct push "$CT" "$stage/panel.tgz" /tmp/swpanel.tgz
 
 NODE_IP=$(ip -4 -br addr show vmbr0 | awk '{print $3}' | cut -d/ -f1)
@@ -55,11 +28,12 @@ pct exec "$CT" -- bash -s "$NODE_IP" "$FP" "$AUTOCFG" <<'EOS'
 set -euo pipefail
 NODE_IP="$1"; FP="$2"; AUTOCFG="$3"
 export DEBIAN_FRONTEND=noninteractive
-PKGS="python3-fastapi python3-uvicorn python3-requests python3-paramiko python3-cryptography openssh-client openssl certbot python3-certbot-dns-cloudflare"
+mkdir -p /tmp/swpanel.peek && tar -xzf /tmp/swpanel.tgz -C /tmp/swpanel.peek opt/swpanel/packages.txt
+PKGS=$(cat /tmp/swpanel.peek/opt/swpanel/packages.txt); rm -rf /tmp/swpanel.peek
 dpkg -s $PKGS >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq $PKGS >/dev/null; }
 systemctl disable --now certbot.timer >/dev/null 2>&1 || true      # renewal is done by the panel, without root
 id swpanel >/dev/null 2>&1 || useradd --system --home /var/lib/swpanel --shell /usr/sbin/nologin swpanel
-rm -rf /opt/swpanel.new && mkdir -p /opt/swpanel.new && tar -xzf /tmp/swpanel.tgz -C /opt/swpanel.new && rm /tmp/swpanel.tgz
+rm -rf /opt/swpanel.new && mkdir -p /opt/swpanel.new && tar --no-same-owner -xzf /tmp/swpanel.tgz -C /opt/swpanel.new && rm /tmp/swpanel.tgz
 rm -rf /opt/swpanel.old; [ -d /opt/swpanel ] && mv /opt/swpanel /opt/swpanel.old; mv /opt/swpanel.new/opt/swpanel /opt/swpanel; rm -rf /opt/swpanel.new /opt/swpanel.old
 install -d -m 0750 -o root -g swpanel /etc/swpanel
 install -d -m 0700 -o swpanel -g swpanel /var/lib/swpanel /var/lib/swpanel/keys
@@ -73,33 +47,11 @@ if [ ! -f /etc/swpanel/tls.key ]; then
         -addext "subjectAltName=DNS:$(hostname),IP:$ip" -keyout /etc/swpanel/tls.key -out /etc/swpanel/tls.crt 2>/dev/null
 fi
 chgrp swpanel /etc/swpanel/tls.key /etc/swpanel/tls.crt; chmod 640 /etc/swpanel/tls.key
-cat > /etc/systemd/system/swpanel.service <<'UNIT'
-[Unit]
-Description=IBM Storage Plugin Proxmox - web panel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=swpanel
-Group=swpanel
-WorkingDirectory=/opt/swpanel/app
-ExecStartPre=+/opt/swpanel/setup-issue.sh
-ExecStart=/usr/bin/python3 /opt/swpanel/app/run.py
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/swpanel
-PrivateTmp=yes
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+install -d -m 0700 -o swpanel -g swpanel /var/lib/swpanel/update
+install -m 644 /opt/swpanel/systemd/swpanel.service /opt/swpanel/systemd/swpanel-update.service /opt/swpanel/systemd/swpanel-update.path /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q swpanel
+systemctl enable -q --now swpanel-update.path
 systemctl restart swpanel
 EOS
 

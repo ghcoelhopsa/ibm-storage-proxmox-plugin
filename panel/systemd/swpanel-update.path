@@ -1,0 +1,9 @@
+[Unit]
+Description=IBM Storage Plugin Proxmox - panel update requests
+
+[Path]
+PathExists=/var/lib/swpanel/update/request
+Unit=swpanel-update.service
+
+[Install]
+WantedBy=multi-user.target

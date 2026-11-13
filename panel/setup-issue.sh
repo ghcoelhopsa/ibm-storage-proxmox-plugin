@@ -15,7 +15,7 @@ if [ ! -s /etc/swpanel/tls.key ] || [ ! -s /etc/swpanel/tls.crt ]; then
         -addext "subjectAltName=DNS:$(hostname)${ip:+,IP:$ip}" -keyout /etc/swpanel/tls.key -out /etc/swpanel/tls.crt 2>/dev/null
     chgrp swpanel /etc/swpanel/tls.key /etc/swpanel/tls.crt; chmod 640 /etc/swpanel/tls.key
 fi
-install -d -m 0700 -o swpanel -g swpanel $D $D/keys
+install -d -m 0700 -o swpanel -g swpanel $D $D/keys $D/update
 if [ -s $D/config.json ] || [ -s /etc/swpanel/config.json ]; then
     rm -f $D/setup-code
     [ -f /etc/issue.swpanel-orig ] && cp /etc/issue.swpanel-orig /etc/issue
