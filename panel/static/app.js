@@ -331,10 +331,11 @@ const NAV = [
   { section: "Infrastructure" },
   { h: "#/nodes", t: "Proxmox nodes", i: "server--proxy" },
   { h: "#/https", t: "Domain and certificate", i: "locked" },
+  { h: "#/updates", t: "Updates", i: "download" },
 ];
 function buildNav() {
   $("#nav-items").innerHTML = NAV.filter(n => !n.dr || (ME && ME.dr)).map(n => n.section ? `<li class="nav-section">${esc(n.section)}</li>` :
-    `<li class="cds--side-nav__item"><a class="cds--side-nav__link" href="${n.h}"><div class="cds--side-nav__icon">${icon(n.i, 16)}</div><span class="cds--side-nav__link-text">${esc(n.t)}</span></a></li>`).join("");
+    `<li class="cds--side-nav__item"><a class="cds--side-nav__link" href="${n.h}"><div class="cds--side-nav__icon">${icon(n.i, 16)}</div><span class="cds--side-nav__link-text">${esc(n.t)}${n.h === "#/updates" && ME && ME.update ? ` <span class="nav-badge" title="${esc(tr("Update available"))}">${esc(ME.update)}</span>` : ""}</span></a></li>`).join("");
   $("#menu-btn").innerHTML = icon("menu", 20);
 }
 function markNav() {
@@ -373,7 +374,7 @@ $("#menu-btn").onclick = () => { const o = !$("#sidenav").classList.contains("op
 $("#nav-scrim").onclick = () => { $("#sidenav").classList.remove("open"); $("#nav-scrim").hidden = true; };
 document.addEventListener("click", e => { if (e.target.closest(".cds--side-nav__link")) { $("#sidenav").classList.remove("open"); $("#nav-scrim").hidden = true; } });
 
-const routes = { setup: pageSetup, "": pageDashboard, storages: pageStorages, storage: pageStorage, add: pageWizard, vms: pageVMs, diskperf: pageDiskPerf, reconcile: pageReconcile, performance: pagePerformance, nodes: pageNodes, dr: pageDR, https: pageHttps, backups: pageBackups };
+const routes = { setup: pageSetup, "": pageDashboard, storages: pageStorages, storage: pageStorage, add: pageWizard, vms: pageVMs, diskperf: pageDiskPerf, reconcile: pageReconcile, performance: pagePerformance, nodes: pageNodes, dr: pageDR, https: pageHttps, backups: pageBackups, updates: pageUpdates };
 async function route() {
   const seq = ++ROUTE_SEQ;
   window.__charts = []; closeMenu(); DT_SEQ = 0;
@@ -382,7 +383,7 @@ async function route() {
   if (parts[0] === "setup" && !ME) { ME = await api("GET", "/me").catch(() => null); if (!ME) { shell(false); return pageSetup(); } }
   if (!ME) { try { ME = await api("GET", "/me"); } catch (e) { location.hash = "#/login"; return; } }
   shell(true);
-  if (!!ME.dr !== !!$('#nav-items a[href="#/dr"]')) { buildNav(); markNav(); }
+  if (!!ME.dr !== !!$('#nav-items a[href="#/dr"]') || !!ME.update !== !!$("#nav-items .nav-badge")) { buildNav(); markNav(); }
   const fn = routes[parts[0]] || pageDashboard;
   if (main.dataset.route !== location.hash) main.innerHTML = skeleton();
   main.dataset.route = location.hash;
@@ -390,7 +391,7 @@ async function route() {
   catch (e) { if (seq === ROUTE_SEQ) main.innerHTML = `<div class="page">${notification("err", "Could not load this page", esc(e.message))}</div>`; }
 }
 const PAGE_TITLES = { "": "Dashboard", storages: "Storages", storage: "Storage", add: "Add storage", setup: "Proxmox connection", vms: "VMs and volumes",
-  diskperf: "Disk performance", reconcile: "Reconciliation", performance: "Performance", nodes: "Proxmox nodes", login: "Sign in", dr: "DR", https: "Domain and certificate", backups: "Backups" };
+  diskperf: "Disk performance", reconcile: "Reconciliation", performance: "Performance", nodes: "Proxmox nodes", login: "Sign in", dr: "DR", https: "Domain and certificate", backups: "Backups", updates: "Updates" };
 function setTitle() {
   const p = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   const extra = p[0] === "storage" && p[1] ? ` ${p[1]}` : p[0] === "diskperf" && p[1] ? ` · VM ${p[1]} ${p[2] || ""}` : "";
@@ -1400,6 +1401,85 @@ async function pagePerformance(id, hours = "6") {
   C.forEach(([title, unit, s]) => { const el = document.createElement("div"); el.className = "chart"; box.appendChild(el); lineChart(el, { title, unit, hours: h, series: s.map(([k, label]) => ({ label, pts: data[k] || [] })) }); });
   $("#p-st").onchange = () => location.hash = `#/performance/${encodeURIComponent($("#p-st").value)}/${h}`;
   $$("#p-h button").forEach(b => b.onclick = () => location.hash = `#/performance/${encodeURIComponent(id)}/${b.dataset.v}`);
+}
+
+/* ======================================================================
+   Panel updates: release notes first, then the code is replaced (container and data stay)
+   ====================================================================== */
+// Release notes are Markdown written by the project: escaped first, then a small subset is formatted
+function mdLite(src) {
+  const inline = t => esc(t).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g, (m, a, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${a}</a>`);
+  const out = []; let list = false, table = null, code = null;
+  const flush = () => { if (list) { out.push("</ul>"); list = false; } if (table) { out.push(`<table class="mini">${table.join("")}</table>`); table = null; } };
+  for (const raw of String(src || "").split("\n")) {
+    const l = raw.replace(/\s+$/, "");
+    if (code !== null) { if (/^```/.test(l)) { out.push(`<pre class="term">${esc(code.join("\n"))}</pre>`); code = null; } else code.push(raw); continue; }
+    if (/^```/.test(l)) { flush(); code = []; continue; }
+    let m;
+    if ((m = l.match(/^(#{1,4})\s+(.*)$/))) { flush(); out.push(`<h4 class="md-h">${inline(m[2])}</h4>`); continue; }
+    if ((m = l.match(/^\s*[-*]\s+(.*)$/))) { if (table) flush(); if (!list) { out.push("<ul class=\"md-ul\">"); list = true; } out.push(`<li>${inline(m[1])}</li>`); continue; }
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      if (list) { out.push("</ul>"); list = false; }
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(l)) continue;
+      const cells = l.trim().slice(1, -1).split("|").map(c => c.trim());
+      table = table || []; table.push(`<tr>${cells.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`); continue;
+    }
+    if (list && /^\s{2,}\S/.test(l)) { out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, " " + inline(l.trim()) + "</li>"); continue; }
+    flush();
+    if (l.trim()) out.push(`<p>${inline(l)}</p>`);
+  }
+  flush(); if (code !== null) out.push(`<pre class="term">${esc(code.join("\n"))}</pre>`);
+  return `<div class="md">${out.join("")}</div>`;
+}
+async function pageUpdates() {
+  const U = await api("GET", "/update"), reload = () => { main.dataset.route = ""; route(); };
+  const rel = U.releases || [], target = rel.filter(r => r.installable).slice(-1)[0], st = U.status || {};
+  const when = t => t ? new Date(t * 1000).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }) : "–";
+  const pub = r => r.published ? new Date(r.published).toLocaleDateString(LOCALE) : "";
+  main.innerHTML = `<div class="page">${pageHeader({ title: "Updates", sub: "Updates replace only the panel code. The container, its configuration, the array keys and the history stay as they are." })}
+    ${st.state === "failed" ? notification("err", "The last update did not finish", esc(st.message || "")) : ""}
+    ${st.state === "done" ? notification("ok", "Last update", esc(st.message || "")) : ""}
+    ${U.error ? notification("warn", "Could not check for updates", `${esc(U.error)}<br><span class="helper">${esc(tr("The panel needs HTTPS access to"))} ${esc(U.source || "")}</span>`) : ""}
+    <div class="g g-2" style="margin-bottom:1.5rem">
+      <section class="tile"><h3 class="tile-title">${esc(tr("Installed"))}</h3>${sl([["Version", `<b>${esc(U.current)}</b> ${esc(U.stage || "")}`],
+        ["Last check", `${esc(when(U.checked))} ${btn("Check now", "ghost", "data-chk", "renew", "sm")}`],
+        ["Available", target ? tag(target.version, "green") : `<span class="muted">${esc(tr("the panel is up to date"))}</span>`]])}</section>
+      <section class="tile"><h3 class="tile-title">${esc(tr("After updating the panel"))}</h3><p>${esc(tr("Each Proxmox node then shows the new plugin version on the Proxmox nodes page; use Update node there to install it. Running VMs are not affected."))}</p></section>
+    </div>
+    ${rel.length ? `<section class="tile" style="margin-bottom:1.5rem"><h3 class="tile-title">${esc(tr("What changes"))} · ${esc(U.current)} → ${esc(rel[rel.length - 1].version)}</h3>
+      ${rel.slice().reverse().map(r => `<div class="rel"><div class="rel-h"><b>${esc(r.name || r.version)}</b> <span class="helper">${esc(pub(r))}</span> ${r.prerelease ? tag("beta", "purple") : ""}
+        ${r.installable ? "" : tag(r.why || "not installable", "warn")} ${r.url ? `<a class="cds--link" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">GitHub</a>` : ""}</div>
+        ${r.notes ? mdLite(r.notes) : `<p class="muted">${esc(tr("No release notes."))}</p>`}</div>`).join("")}
+      ${target && ME.admin ? `<div style="margin-top:1rem">${btn(`${tr("Update to")} ${target.version}`, "primary", `data-upd="${esc(target.version)}"`, "download")}</div>` : ""}</section>` : ""}
+    <section class="tile"><h3 class="tile-title">${esc(tr("In this version"))} · ${esc(U.current)}</h3>${U.notes_current ? mdLite(U.notes_current) : `<p class="muted">${esc(tr("No release notes."))}</p>`}</section></div>`;
+  $("[data-chk]").onclick = async e => { await busy(e.currentTarget, () => api("GET", "/update?refresh=1")); ME = await api("GET", "/me"); buildNav(); markNav(); reload(); };
+  const ub = $("[data-upd]");
+  if (ub) ub.onclick = async () => {
+    const v = ub.dataset.upd;
+    if (!await confirmDialog({ label: `${U.current} → ${v}`, title: `${tr("Update the panel to")} ${v}?`, ok: "Update",
+      body: `<p>${esc(tr("The panel downloads the package, checks its signature and restarts with the new code. The page reloads by itself; if the new version does not start, the previous one is put back."))}</p>` })) return;
+    try { await busy(ub, () => api("POST", "/update", { version: v })); } catch (e) { return toast("err", "The update was not started", e.message); }
+    updateProgress(v);
+  };
+}
+async function updateProgress(v) {
+  await modal({ label: `${tr("Version")} ${v}`, title: "Updating the panel", size: "sm", buttons: [],
+    body: `<p id="up-msg" class="helper">${esc(tr("waiting for the installer"))}…</p><div class="bar" style="margin-top:1rem"><span class="up-bar" style="width:15%"></span></div>`,
+    onOpen: async root => {
+      const end = Date.now() + 5 * 60000; let seen = false;
+      while (Date.now() < end) {
+        await new Promise(r => setTimeout(r, 2500));
+        try {
+          const s = await api("GET", "/update/status");
+          seen = true;
+          if (s.status && s.status.message) $("#up-msg", root).textContent = tr(s.status.message);
+          if (s.current === v) { $("#up-msg", root).textContent = tr("Done. Reloading…"); setTimeout(() => location.reload(), 1200); return; }
+          if (s.status && s.status.state === "failed") { $("#up-msg", root).innerHTML = notification("err", "Update failed", esc(s.status.message)); return; }
+        } catch (e) { if (seen) $("#up-msg", root).textContent = tr("restarting the panel"); }
+      }
+      $("#up-msg", root).innerHTML = notification("warn", "The panel did not come back in 5 minutes", esc(tr("Open the container console: /var/lib/swpanel/update/update.log")));
+    } });
 }
 
 /* ======================================================================

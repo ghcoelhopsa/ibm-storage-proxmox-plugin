@@ -28,11 +28,12 @@ import signal
 import store
 import sv8
 import tlsconf
+import updates
 from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -458,8 +459,40 @@ def dr_enabled():
 
 @app.get("/api/me")
 def me(s=Depends(session)):
+    rel = updates.latest_installable(updates.cached())
     return {"user": s["pve"]["user"], "admin": "Sys.Modify" in s["privs"], "version": VERSION, "stage": STAGE,
-            "pve_host": CFG.get("pve_host"), "dr": dr_enabled()}
+            "pve_host": CFG.get("pve_host"), "dr": dr_enabled(), "update": rel["version"] if rel else None}
+
+
+# ---------------------------------------------------------------------------
+# panel update (code only; the container, its configuration and data stay)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/update")
+def update_info(refresh: int = 0, s=Depends(session)):
+    c = updates.cached()
+    if refresh or not c or c.get("current") != VERSION or time.time() - c.get("checked", 0) > 6 * 3600:
+        c = updates.check(VERSION)
+    return {"current": VERSION, "stage": STAGE, "notes_current": updates.changelog_section(VERSION),
+            "checked": c.get("checked"), "error": c.get("error", ""), "source": c.get("source"),
+            "releases": c.get("releases", []), "status": updates.status()}
+
+
+@app.post("/api/update")
+async def update_start(request: Request, s=Depends(admin)):
+    ver = str((await request.json()).get("version", ""))
+    rel = next((r for r in updates.check(VERSION).get("releases", []) if r["version"] == ver), None)
+    if not rel:
+        err(404, f"version {ver} is not among the available updates")
+    try:
+        return await run_in_threadpool(updates.download_and_request, rel, s["pve"]["user"])
+    except updates.UpdateError as e:
+        err(409, str(e))
+
+
+@app.get("/api/update/status")
+def update_status(s=Depends(session)):
+    return {"current": VERSION, "status": updates.status()}
 
 
 # ---------------------------------------------------------------------------
@@ -1932,6 +1965,11 @@ def collector():
                     collect_vdisks(meta["address"], {"user": meta["user"], "key": store.array_key(sid)})
                 except Exception:
                     pass
+        if tick % 1440 == 30:                   # once a day: are there panel updates?
+            try:
+                updates.check(VERSION)
+            except Exception:
+                pass                            # the Updates page shows the error of the next check
         if tick % 1440 == 5:                    # once a day: Let's Encrypt renewal
             try:
                 if tlsconf.renew_if_due():

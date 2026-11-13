@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.5-beta - 2026-11-13
+- Panel update from the panel: the new **Updates** page lists the newer releases with their notes
+  and installs the chosen one with one click. Only the panel code is replaced; the container, its
+  configuration, the array keys and the history stay.
+- Every update package is signed (Ed25519). The panel and the installer both check the signature
+  with the public key shipped in the panel; an unsigned or changed package is refused.
+- The installer keeps the previous version and puts it back by itself when the new one does not
+  answer within 60 seconds.
+- A release without notes is not offered for installation. `scripts/release.sh` builds and signs
+  the package and takes the release notes from this file; it stops when the version has no section.
+- The panel checks for updates once a day and shows a badge on the menu when one is available.
+- After the panel, each node shows the new plugin version on the Proxmox nodes page, installed with
+  Update node as before.
+- `panel/deploy.sh` and the in-panel update install the same package
+  (`scripts/build-panel-package.sh`).
+
 ## 0.3.4-beta - 2026-11-13
 Validated on an IBM FlashSystem 7600 (firmware 9.1.2) with a two-node Proxmox VE 9.2 cluster.
 Measured numbers: docs/PERFORMANCE.md.

@@ -52,3 +52,7 @@ the tests marked with (auto).
 | T45 | FC path loss | take the active path offline under fio | failover under 1 s, no I/O error, return to the preferred path | Passed (9.1.2) |
 | T46 | concurrency | backups, snapshots, migrations, clone, move and resize at the same time, fio with verification | every job ends, no data error | Passed (9.1.2), see docs/PERFORMANCE.md |
 | T47 | snapshot policy from the panel | create with Safeguarded and assign to VMs; delete | policy on the array, snapshots on schedule | Passed (9.1.2) |
+| T48 | panel update from the panel | Updates page › Update to (0.3.5 → 0.3.6, test release list) | code replaced in 3 s, configuration kept, previous version in `/opt/swpanel.old` | Passed |
+| T49 | changed package | one byte changed, original signature | refused by the panel and by the root installer; nothing changed | Passed |
+| T50 | new version that does not start | signed package that fails at start | after 60 s the previous version is back and answering | Passed |
+| T51 | release without notes | release with package, empty notes | listed, not offered; `scripts/release.sh` refuses a version without a CHANGELOG section | Passed |

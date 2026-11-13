@@ -187,6 +187,18 @@ storage), so nothing changes on the array. Generate a new key only when the Prox
 opens the array: from the moment it changes on the array until you click **Test and apply**, the
 plugin cannot reach the array.
 
+### Updating
+
+From 0.3.5 on, the panel updates itself: **Updates** in the menu lists the newer releases with
+their notes, and **Update to** replaces the panel code. The container, its configuration, the array
+keys and the history stay. The package is signed and checked before it is installed; if the new
+version does not start, the previous one comes back. Then use **Update node** on the
+**Proxmox nodes** page to install the new plugin version on each node.
+
+A panel on 0.3.4 or older updates once with `panel/deploy.sh <ctid>` from a clone of the
+repository; after that, updates come through the panel. The container needs HTTPS access to
+`api.github.com` and `github.com`.
+
 ### Installing the plugin without the panel
 
 On every node:
