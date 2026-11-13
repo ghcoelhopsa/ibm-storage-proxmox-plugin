@@ -5,16 +5,25 @@ in the same format as the Proxmox VM backup (restore from the GUI / qmrestore).
   cbt_backup.py <vmid> <pbs-storage> [--full]
 
 Cycle, without pausing the VM:
-  1. prepare the FlashCopy (consistency group + prestart/flush)
-  2. new bitmap  ->  [fs-freeze]  ->  trigger the FlashCopy  ->  [fs-thaw]  ->  disable the old bitmap
-  3. map the snapshots on the proxy (this node) and read:
+  1. prepare the FlashCopy (consistency group + prestart/flush); not needed with volume groups
+  2. new bitmap  ->  [fs-freeze]  ->  trigger the FlashCopy, or addsnapshot of the guest volume
+     group (sw-snapmode=volumegroup, 8.5+/9.x)  ->  [fs-thaw]  ->  disable the old bitmap
+  3. map the snapshots on the proxy (this node; with volume groups, a thinclone of the snapshot
+     mapped to this node only) and read:
        full:        every 4 MiB chunk (zeroed chunks are not sent)
        incremental: only the chunks the old bitmap marked
   4. send to PBS with libproxmox_backup_qemu (incremental reuses the previous index)
   5. delete the array snapshot and the old bitmap; save the state
+
+The bitmap state lives in /etc/pve (shared by the cluster): after a live migration the next
+backup runs on the other node and stays incremental (QEMU carries the bitmap with the VM).
+Upload speed follows the Proxmox backup bandwidth limit (vzdump.conf, datacenter, storage) or
+--bwlimit <KiB/s>: on a 1 GbE network a backup at full speed competes with corosync.
 """
 import concurrent.futures as cf
 import atexit
+import re
+import threading
 import ctypes
 import json
 import os
@@ -27,7 +36,8 @@ import nbd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(HERE, "sw-snap.pl")
-STATE_DIR = "/var/lib/ibm-storage-cbt"
+STATE_DIR = "/var/lib/ibm-storage-cbt"               # before 0.3.4: state per node
+SHARED_DIR = "/etc/pve/priv/ibm-storage-cbt"          # bitmap + PBS library state, seen by every node
 CHUNK = 4 * 1024 * 1024
 WORKERS = 4
 ZERO = bytes(CHUNK)
@@ -165,6 +175,82 @@ def dirty_chunks(vmid, node, bitmap, name, sock, size):
     return sorted(chunks)
 
 
+def storage_section(storeid):
+    cur, out = None, {}
+    for l in open("/etc/pve/storage.cfg"):
+        if l and not l[0].isspace() and ":" in l:
+            t, _, n = l.strip().partition(": ")
+            cur = n.strip() if n.strip() == storeid else None
+            if cur:
+                out["type"] = t
+        elif cur and l.strip():
+            k, _, v = l.strip().partition(" ")
+            out[k] = v.strip()
+    return out
+
+
+def kib_limit(text, op="backup"):
+    """'backup=1000,default=2000' or a plain number -> KiB/s for the operation, None if unset."""
+    if not text:
+        return None
+    text = text.strip()
+    if text.isdigit():
+        return int(text) or None
+    vals = dict(p.split("=", 1) for p in text.split(",") if "=" in p)
+    for k in (op, "default"):
+        if vals.get(k, "").isdigit() and int(vals[k]) > 0:
+            return int(vals[k])
+    return None
+
+
+def bandwidth_limit(pbs_store):
+    """Lowest backup limit set in Proxmox (KiB/s), like vzdump does; --bwlimit overrides."""
+    for i, a in enumerate(sys.argv):
+        if a == "--bwlimit" and i + 1 < len(sys.argv):
+            return int(sys.argv[i + 1]) or None
+    lims = []
+    try:
+        for l in open("/etc/vzdump.conf"):
+            m = re.match(r"^\s*bwlimit:\s*(\d+)", l)
+            if m and int(m.group(1)):
+                lims.append(int(m.group(1)))
+    except OSError:
+        pass
+    try:
+        for l in open("/etc/pve/datacenter.cfg"):
+            if l.startswith("bwlimit:"):
+                v = kib_limit(l.split(":", 1)[1])
+                if v:
+                    lims.append(v)
+    except OSError:
+        pass
+    v = kib_limit(storage_section(pbs_store).get("bwlimit"))
+    if v:
+        lims.append(v)
+    return min(lims) if lims else None
+
+
+class Throttle:
+    """Token bucket shared by the upload threads (bytes per second)."""
+    def __init__(self, kib_s):
+        self.rate = kib_s * 1024 if kib_s else None
+        self.lock = threading.Lock()
+        self.t = time.monotonic()
+        self.allow = 0.0
+
+    def take(self, n):
+        if not self.rate:
+            return
+        with self.lock:
+            now = time.monotonic()
+            self.allow = min(self.rate, self.allow + (now - self.t) * self.rate)
+            self.t = now
+            self.allow -= n
+            wait = -self.allow / self.rate if self.allow < 0 else 0
+        if wait > 0:
+            time.sleep(wait)
+
+
 def helper(store, *a):
     return sh("perl", HELPER, a[0], store, *map(str, a[1:]))
 
@@ -205,8 +291,14 @@ def main():
         raise SystemExit(f"VM {vmid} is stopped (the snapshot backup needs it running)")
     force_full = "--full" in sys.argv
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    stf = f"{STATE_DIR}/{vmid}-{pbs_store}.json"
-    lsf = f"{STATE_DIR}/{vmid}-{pbs_store}.libstate"
+    os.makedirs(SHARED_DIR, exist_ok=True)
+    stf = f"{SHARED_DIR}/{vmid}-{pbs_store}.json"
+    # The PBS library state (~100 bytes: checksum of the last index of each disk) must travel
+    # with the bitmap: without it the library refuses the incremental and reads the whole disk.
+    lsf = f"{SHARED_DIR}/{vmid}-{pbs_store}.libstate"
+    for new, old in ((stf, f"{STATE_DIR}/{vmid}-{pbs_store}.json"), (lsf, f"{STATE_DIR}/{vmid}-{pbs_store}.libstate")):
+        if not os.path.exists(new) and os.path.exists(old):             # before 0.3.4 the state was per node
+            open(new, "wb").write(open(old, "rb").read())
     state = json.load(open(stf)) if os.path.exists(stf) else {}
     array_store = state.get("array_store") or [l.split(": ")[1].split(":")[0] for l in sh("qm", "config", str(vmid)).splitlines()
                                                if l.startswith("scsi0: ")][0]
@@ -214,10 +306,15 @@ def main():
     T0 = time.time()
 
     check_supported(vmid, array_store)
+    vgmode = storage_section(array_store).get("sw-snapmode") == "volumegroup"
     disks = guest_disks(vmid, array_store)
     old_bm = state.get("bitmap")
     have_bm = bool(old_bm) and all(old_bm in d["bitmaps"] for d in disks.values())
     mode = "incremental" if have_bm and os.path.exists(lsf) and not force_full else "full"
+    limit = bandwidth_limit(pbs_store)
+    throttle = Throttle(limit)
+    rep["bwlimit_KiB_s"] = limit
+    rep["snapshot_engine"] = "volumegroup" if vgmode else "flashcopy"
     rep["reason"] = "--full requested" if force_full else ("no bitmap (first backup or VM restarted)" if not have_bm else "bitmap ok")
     new_bm = f"swcbt-{int(time.time())}"
     snap = f"cbt{int(time.time())}"
@@ -238,15 +335,16 @@ def main():
 
     # 1-2. array snapshot with an overlapping bitmap swap (without pausing the VM)
     t = time.time()
-    helper(array_store, "prepare", vmid, snap, *vols)
-    rep["t"]["flashcopy_prepare"] = round(time.time() - t, 2)
+    if not vgmode:
+        helper(array_store, "prepare", vmid, snap, *vols)
+        rep["t"]["flashcopy_prepare"] = round(time.time() - t, 2)
     qmp(vmid, "transaction", actions=[{"type": "block-dirty-bitmap-add",
         "data": {"node": d["node"], "name": new_bm, "granularity": 65536}} for d in disks.values()])
     use_agent = "agent: 1" in sh("qm", "config", str(vmid)) or "agent: enabled=1" in sh("qm", "config", str(vmid))
     frozen = use_agent and agent(vmid, "fsfreeze-freeze")
     t = time.time()
     try:
-        helper(array_store, "trigger", vmid, snap)
+        helper(array_store, "vgsnap" if vgmode else "trigger", vmid, snap)
     finally:
         if frozen:
             agent(vmid, "fsfreeze-thaw")
@@ -255,6 +353,13 @@ def main():
     if have_bm:
         qmp(vmid, "transaction", actions=[{"type": "block-dirty-bitmap-disable",
             "data": {"node": d["node"], "name": old_bm}} for d in disks.values()])
+    # Bitmaps left by a run that was killed (no chance to merge them) hold writes the old bitmap
+    # missed: fold them into it. The new bitmap already records, so nothing falls in between.
+    for d in disks.values():
+        for b in sorted(x for x in d["bitmaps"] if x.startswith("swcbt-") and x not in (old_bm, new_bm)):
+            if have_bm:
+                qmp(vmid, "block-dirty-bitmap-merge", node=d["node"], target=old_bm, bitmaps=[b])
+            qmp(vmid, "block-dirty-bitmap-remove", node=d["node"], name=b)
 
     sock = f"/run/ibm-storage-cbt-{vmid}.sock"
     handle = None
@@ -271,8 +376,13 @@ def main():
             finally:
                 qmp(vmid, "nbd-server-stop")
         progress(phase="mapping the snapshot")
-        for k, d in disks.items():
-            d["dev"] = helper(array_store, "map", d["volname"], snap)
+        if vgmode:
+            devmap = dict(l.split(" ", 1) for l in helper(array_store, "vgmap", vmid, snap, *vols).splitlines() if " " in l)
+            for k, d in disks.items():
+                d["dev"] = devmap[d["volname"]]
+        else:
+            for k, d in disks.items():
+                d["dev"] = helper(array_store, "map", d["volname"], snap)
         progress(phase="reading and sending", total=sum((len(d["chunks"]) * CHUNK if d.get("chunks") is not None else d["size"]) for d in disks.values()))
         last_p = [0.0]
 
@@ -311,6 +421,8 @@ def main():
                     r = lib.proxmox_backup_write_data(handle, dev_id, None, off, ln, ctypes.byref(e))
                     return ln, -1 if r < 0 else 0, "zero", e
                 r = lib.proxmox_backup_write_data(handle, dev_id, data, off, ln, ctypes.byref(e))
+                if r > 0:
+                    throttle.take(ln)        # only what went to the PBS; known chunks do not travel
                 return ln, r, "data", e
 
             with cf.ThreadPoolExecutor(WORKERS) as ex:
@@ -368,19 +480,38 @@ def main():
         json.dump({"bitmap": new_bm, "array_store": array_store, "last": state.get("last")}, open(stf, "w"))
         raise
     finally:
-        for d in disks.values():
+        if vgmode:
             try:
-                helper(array_store, "unmap", d["volname"], snap)
+                helper(array_store, "vgclean", vmid, snap)
             except Exception as e:
-                print("warning unmap:", e, file=sys.stderr)
-        for d in disks.values():
-            try:
-                helper(array_store, "delete", d["volname"], snap)
-            except Exception as e:
-                print("warning delete snapshot:", e, file=sys.stderr)
+                print("warning cleanup:", e, file=sys.stderr)
+        else:
+            for d in disks.values():
+                try:
+                    helper(array_store, "unmap", d["volname"], snap)
+                except Exception as e:
+                    print("warning unmap:", e, file=sys.stderr)
+            for d in disks.values():
+                try:
+                    helper(array_store, "delete", d["volname"], snap)
+                except Exception as e:
+                    print("warning delete snapshot:", e, file=sys.stderr)
     rep["t"]["total"] = round(time.time() - T0, 2)
     print(json.dumps(rep, indent=1, ensure_ascii=False))
 
 
+def locked(vmid, fn):
+    """Same lock as vzdump ('lock: backup'): Proxmox refuses migration, snapshots and config
+    changes while the backup runs. A migration in the middle would move the VM config away
+    and the backup would fail."""
+    p = subprocess.run(["qm", "set", str(vmid), "--lock", "backup"], capture_output=True, text=True)
+    if p.returncode:
+        raise SystemExit(f"VM {vmid} could not be locked for the backup: {(p.stderr or p.stdout).strip()}")
+    try:
+        return fn()
+    finally:
+        subprocess.run(["qm", "unlock", str(vmid)], capture_output=True)
+
+
 if __name__ == "__main__":
-    main()
+    locked(sys.argv[1], main)

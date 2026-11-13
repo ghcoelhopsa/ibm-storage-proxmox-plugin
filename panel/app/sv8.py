@@ -10,7 +10,8 @@ import re
 from sv import ArrayError, code_ge
 
 VG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,62}$")
-SNAPNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+# up to 63: snapshots taken by a policy are named snapshot-<UUID> (45 characters)
+SNAPNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
 REPL_ACTIONS = {
     "failover": ("mode", "independent"),         # runs on the system that holds the recovery copy
     "restart": ("mode", "production"),           # runs on the system that becomes production
@@ -28,6 +29,8 @@ def caps8(code_level):
         "partition": code_ge(code_level, "8.6.1"),
         # 9.1.0+: inside a partition, the recovery copy stays online and read only
         "readonly_recovery": code_ge(code_level, "9.1.0"),
+        # mkvolumegroup -type thinclone|clone from a volume group snapshot (validated on 9.1.2)
+        "vg_clone": code_ge(code_level, "8.6.0"),
     }
 
 
@@ -99,13 +102,19 @@ def protection(a, prefix, system, partition=None):
             "time": s.get("time") or s.get("timestamp") or "", "expires": s.get("expiration_time") or "",
             "safeguarded": _yes(s.get("safeguarded")), "state": s.get("state") or "",
             "auto": _yes(s.get("auto_snapshot")), "matches_group": s.get("matches_group") or "",
+            "anomaly": s.get("anomaly_status") or "", "written": s.get("protection_written_capacity") or "",
         })
     sched = {}
     for r in _ls(a, "lssnapshotschedule"):
         sched.setdefault(r.get("policy_name", ""), []).append(
-            {"unit": r.get("backup_unit"), "interval": r.get("backup_interval"), "retention_days": r.get("retention_days")})
-    out["snapshot_policies"] = [{"name": p.get("name"), "schedules": sched.get(p.get("name"), [])} for p in _ls(a, "lssnapshotpolicy")]
-    vgpol = {r.get("volume_group_name"): r for r in _ls(a, "lsvolumegroupsnapshotpolicy")}
+            {"unit": r.get("backup_unit"), "interval": r.get("backup_interval"), "retention_days": r.get("retention_days"),
+             "type": r.get("schedule_type") or "localsnapshot"})
+    out["snapshot_policies"] = [{"name": p.get("name"), "schedules": sched.get(p.get("name"), []),
+                                 "predefined": _yes(p.get("predefined")), "volume_groups": int(p.get("volume_group_count") or 0)}
+                                for p in _ls(a, "lssnapshotpolicy")]
+    out["time_zone"] = (system.get("time_zone") or "").split(" ", 1)[-1]
+    # 9.1: the group name is in "name" (older documentation: volume_group_name)
+    vgpol = {r.get("volume_group_name") or r.get("name"): r for r in _ls(a, "lsvolumegroupsnapshotpolicy")}
     if c["pbr"]:
         out["replication_policies"] = [{"name": p.get("name"), "topology": p.get("topology"), "rpo_alert": p.get("rpo_alert"),
                                         "location1": p.get("location1_system_name"), "location2": p.get("location2_system_name")}
@@ -123,6 +132,7 @@ def protection(a, prefix, system, partition=None):
             "snapshot_policy": g.get("snapshot_policy_name") or pol.get("snapshot_policy_name") or "",
             "policy_safeguarded": _yes(pol.get("snapshot_policy_safeguarded") or g.get("snapshot_policy_safeguarded")),
             "policy_suspended": _yes(pol.get("snapshot_policy_suspended")),
+            "policy_next": pol.get("snapshot_policy_next_time") or "", "policy_last": pol.get("snapshot_policy_last_time") or "",
             "snapshots": sorted(snaps.get(name, []), key=lambda s: s["time"], reverse=True),
             "replication": None,
         }
@@ -153,10 +163,110 @@ def remove_snapshot(a, vg, snap):
     return a.run("rmsnapshot", [("snapshot", snap), ("volumegroup", vg)])
 
 
-def set_snapshot_policy(a, vg, policy, safeguarded=False):
+CLONE_TYPES = ("thinclone", "clone")
+
+
+def clone_from_snapshot(a, prefix, vg, snap, kind, new_vmid, pool, volumes, hostcluster=None, hosts=()):
+    """New volume group <prefix>-vm-<new_vmid> from a volume group snapshot (9.1+ mkvolumegroup -type).
+
+    thinclone: created at once, shares the unchanged data with the snapshot (which the array keeps
+    while the thinclone exists). clone: also usable at once, the array copies the data in the
+    background and the result no longer depends on the snapshot.
+    The volumes are renamed to the plugin names of the new VM and mapped like the plugin does.
+    Returns {source volume name: new volume name}; on failure everything created is removed."""
+    if kind not in CLONE_TYPES:
+        raise ArrayError("invalid clone type")
+    nvg = f"{prefix}-vm-{new_vmid}"
+    if a.show("lsvolumegroup", nvg):
+        raise ArrayError(f"volume group {nvg} already exists")
+    opts = [("type", kind), ("snapshot", snap), ("fromsourcegroup", vg)]
+    if volumes:
+        opts.append(("fromsourcevolumes", ":".join(volumes)))
+    opts += [("name", nvg), ("pool", pool)]
+    a.run("mkvolumegroup", opts)
+    made, out = [], {}
+    try:
+        old = re.compile(rf"^{re.escape(prefix)}-vm-\d+-")
+        for v in a.ls("lsvdisk", [("filtervalue", f"volume_group_name={nvg}")]):
+            d = a.show("lsvdisk", v["id"]) or {}
+            src = d.get("source_volume_name") or ""
+            if not old.match(src):
+                raise ArrayError(f"clone {v['name']} has an unexpected source '{src}'")
+            new = old.sub(f"{prefix}-vm-{new_vmid}-", src, count=1)
+            a.run("chvdisk", [("name", new)], v["id"])
+            made.append(new)
+            if hostcluster:
+                a.run("mkvolumehostclustermap", [("hostcluster", hostcluster)], new)
+            else:
+                for h in hosts:
+                    a.run("mkvdiskhostmap", [("force", None), ("host", h)], new)
+            out[src] = new
+    except Exception:
+        for v in a.ls("lsvdisk", [("filtervalue", f"volume_group_name={nvg}")]):
+            try:
+                a.run("rmvdisk", [("removehostmappings", None)], v["id"])
+            except ArrayError:
+                pass
+        try:
+            a.run("rmvolumegroup", None, nvg)
+        except ArrayError:
+            pass
+        raise
+    return out
+
+
+POLICY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
+POLICY_UNITS = ("minute", "hour", "day", "week", "month")
+
+
+def array_start_time(system, hhmm):
+    """Next HH:MM in the array's time zone as YYMMDDHHMM (format of -backupstarttime/-policystarttime)."""
+    import datetime
+    from zoneinfo import ZoneInfo
+    m = re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", hhmm or "")
+    if not m:
+        raise ArrayError("start time must be HH:MM")
+    try:
+        tz = ZoneInfo((system.get("time_zone") or "").split(" ", 1)[-1] or "UTC")
+    except Exception:
+        tz = datetime.timezone.utc
+    now = datetime.datetime.now(tz)
+    t = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+    if t <= now:
+        t += datetime.timedelta(days=1)
+    return t.strftime("%y%m%d%H%M")
+
+
+def create_snapshot_policy(a, name, unit, interval, retention_days, start=None):
+    if not POLICY_RE.match(name or ""):
+        raise ArrayError("invalid policy name (starts with a letter, letters/digits/_/-, up to 63)")
+    if unit not in POLICY_UNITS:
+        raise ArrayError("invalid unit")
+    if unit == "minute" and int(interval) < 60:
+        raise ArrayError("with minutes the interval is at least 60 (use hours for shorter names)")
+    opts = [("name", name), ("backupunit", unit), ("backupinterval", int(interval))]
+    if start:
+        opts.append(("backupstarttime", start))
+    opts += [("retentiondays", int(retention_days)), ("type", "localsnapshot")]
+    return a.run("mksnapshotpolicy", opts)
+
+
+def remove_snapshot_policy(a, name):
+    """Takes the policy off its volume groups one by one, then deletes it. rmsnapshotpolicy
+    -removefromvolumegroups would do both, but the array refuses it to the Administrator role."""
+    for r in a.ls("lsvolumegroupsnapshotpolicy"):
+        if r.get("snapshot_policy_name") == name:
+            a.run("chvolumegroup", [("nosnapshotpolicy", None)], r.get("volume_group_name") or r.get("name"))
+    return a.run("rmsnapshotpolicy", None, name)
+
+
+def set_snapshot_policy(a, vg, policy, safeguarded=False, start=None):
     if not policy:
         return a.run("chvolumegroup", [("nosnapshotpolicy", None)], vg)
-    return a.run("chvolumegroup", [("snapshotpolicy", policy)] + ([("safeguarded", None)] if safeguarded else []), vg)
+    opts = [("snapshotpolicy", policy)] + ([("safeguarded", None)] if safeguarded else [])
+    if start:
+        opts.append(("policystarttime", start))
+    return a.run("chvolumegroup", opts, vg)
 
 
 def set_replication_policy(a, vg, policy):
