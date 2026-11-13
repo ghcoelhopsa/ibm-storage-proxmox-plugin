@@ -294,9 +294,15 @@ pve-ibm-storage trash-delete v7k pve-trash1794431000-vm-9997-disk-0
 pvesm set v7k --sw-trash-days 14     # 0 turns the trash off
 ```
 
-Disks in a volume group (8.x volume group snapshots, policy-based replication, storage partitions)
-are still deleted at once. The trash does not replace backups: the snapshots of a removed disk are
-not kept.
+On 8.5+/9.x in volume group mode the disk leaves the VM's volume group before going to the trash,
+and restoring it puts it back in the group. Disks in a replicated volume group or in a storage
+partition are deleted at once. The trash does not replace backups: the snapshots of a removed disk
+are not kept.
+
+On the array the trash is plain volumes with the `-trash<time>-` name, unmapped (*Host mappings:
+No*) and outside any volume group:
+
+![Trash on the array: removed disks kept as pve-trash volumes](docs/images/trash-array.png)
 
 ## The web panel
 
