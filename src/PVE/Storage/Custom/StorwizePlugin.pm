@@ -316,7 +316,12 @@ sub run_dir {
     return $dir;
 }
 
-sub password_file { my ($storeid) = @_; return "$PRIV_DIR/$storeid.pw"; }
+sub password_file {
+    my ($storeid) = @_;
+    my ($id) = ($storeid // '') =~ m/^([A-Za-z][A-Za-z0-9_.-]*)$/
+        or die "invalid storage id '" . ($storeid // '') . "'\n";
+    return "$PRIV_DIR/$id.pw";
+}
 
 sub get_password {
     my ($storeid) = @_;
@@ -586,10 +591,14 @@ sub rest_ua {
     require HTTP::Request;
     my %ssl;
     if (my $fp = $scfg->{'sw-fingerprint'}) {
+        # pinned certificate (arrays ship a self-signed one): only that exact certificate is accepted
         $fp =~ s/://g;
-        %ssl = (SSL_verify_mode => 0, SSL_fingerprint => 'sha256$' . lc($fp), verify_hostname => 0);
+        # verification must be on: with SSL_verify_mode 0 IO::Socket::SSL ignores SSL_fingerprint
+        %ssl = (SSL_verify_mode => 1, SSL_fingerprint => 'sha256$' . lc($fp), verify_hostname => 0);
     } else {
-        %ssl = (SSL_verify_mode => 0, verify_hostname => 0);
+        # no pin: the certificate must be valid for the address under the system CAs. Never an
+        # unverified connection, since the array password travels on it.
+        %ssl = (SSL_verify_mode => 1, verify_hostname => 1);
     }
     return LWP::UserAgent->new(timeout => 60, ssl_opts => \%ssl, agent => "pve-ibm-storage/$VERSION");
 }
@@ -613,7 +622,14 @@ sub rest_token {
     $req->header('X-Auth-Username' => $scfg->{'sw-user'});
     $req->header('X-Auth-Password' => $pw);
     my $res = rest_ua($scfg)->request($req);
-    die "storwize: REST auth failed: " . $res->status_line . "\n" if !$res->is_success;
+    if (!$res->is_success) {
+        my $hint = !$scfg->{'sw-fingerprint'} && ($res->status_line . ($res->header('Client-Warning') // '')
+            . ($res->decoded_content // '')) =~ m/certificate|SSL|verify/i
+            ? " - the array certificate is not trusted: check its SHA-256 fingerprint on the array"
+              . " (lssystemcert or the GUI) and set it with 'pvesm set $storeid --sw-fingerprint <fingerprint>'"
+            : '';
+        die "storwize: REST auth failed: " . $res->status_line . "$hint\n";
+    }
     my $tok = eval { decode_json($res->decoded_content)->{token} }
         or die "storwize: REST auth returned no token\n";
     file_set_contents($tfile, "$tok\n", 0600);
@@ -1276,7 +1292,8 @@ sub on_add_hook {
     eval {
         if (backend($scfg, $storeid) eq 'rest' && !$scfg->{'sw-fingerprint'}) {
             $scfg->{'sw-fingerprint'} = fetch_fingerprint($scfg);
-            print "storwize: pinned REST certificate fingerprint $scfg->{'sw-fingerprint'}\n";
+            print "storwize: pinned REST certificate fingerprint $scfg->{'sw-fingerprint'} - compare"
+                . " it with the certificate shown by the array (lssystemcert or the GUI)\n";
         }
         $class->verify_config($storeid, $scfg);
     };
@@ -1293,7 +1310,17 @@ sub on_add_hook {
 sub on_update_hook_full {
     my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
     my %cfg = (%$scfg, %$update);
-    return $class->on_update_hook($storeid, \%cfg, %{ $sensitive // {} });
+    delete $cfg{$_} for @{ $delete // [] };
+    my $r = $class->on_update_hook($storeid, \%cfg, %{ $sensitive // {} });
+    # a storage added with SSH that gets a password (or sw-api rest) now talks REST: pin the
+    # certificate now, as on_add_hook does. Proxmox saves what is set in $update.
+    if (backend(\%cfg, $storeid) eq 'rest' && !$cfg{'sw-fingerprint'}) {
+        my $fp = fetch_fingerprint(\%cfg);
+        $update->{'sw-fingerprint'} = $fp;
+        print "storwize: pinned REST certificate fingerprint $fp - compare it with the certificate"
+            . " shown by the array (lssystemcert or the GUI)\n";
+    }
+    return $r;
 }
 
 sub on_update_hook {

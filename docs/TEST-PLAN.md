@@ -57,3 +57,6 @@ the tests marked with (auto).
 | T50 | new version that does not start | signed package that fails at start | after 60 s the previous version is back and answering | Passed |
 | T51 | release without notes | release with package, empty notes | listed, not offered; `scripts/release.sh` refuses a version without a CHANGELOG section | Passed |
 | T52 | appliance first boot | restore the image, open the console without pressing a key | address and code on the login screen | Passed (tty0 and tty1) |
+| T53 | REST certificate pin | `rest_ua` with the right pin, a wrong pin and no pin, against the FS7600 | right: connects; wrong and none: refused (self-signed certificate) | Passed |
+| T54 | panel CSRF and sign-in limits | POST /api/logout without the header; 22 wrong passwords | 403; 429 from the 9th attempt | Passed |
+| T55 | build with pinned assets | build with the right sha512 and with a changed one | same assets as before; changed hash stops the build | Passed |

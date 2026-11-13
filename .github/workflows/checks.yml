@@ -1,0 +1,46 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Shell scripts (syntax and shellcheck errors)
+        run: |
+          for f in scripts/*.sh panel/*.sh; do bash -n "$f"; done
+          shellcheck -S error scripts/*.sh panel/*.sh
+
+      - name: Python (compile and bandit, medium and high)
+        run: |
+          python3 -m py_compile panel/app/*.py cbt/*.py
+          pipx run bandit -q -r panel/app cbt -ll -s B404,B603,B607
+
+      - name: JavaScript (syntax)
+        run: for f in panel/static/*.js; do node --check "$f"; done
+
+      - name: Perl (syntax, Proxmox modules stubbed)
+        run: |
+          sudo apt-get -qq update && sudo apt-get -qq install -y libjson-perl
+          mkdir -p stub/PVE/Storage stub/PVE/Tools
+          printf 'package PVE::Storage::Plugin; sub new {} 1;\n' > stub/PVE/Storage/Plugin.pm
+          printf 'package PVE::Tools; use Exporter "import"; our @EXPORT_OK = qw(run_command file_read_firstline file_set_contents); sub run_command {} sub file_read_firstline {} sub file_set_contents {} 1;\n' > stub/PVE/Tools.pm
+          printf 'package PVE::JSONSchema; 1;\n' > stub/PVE/JSONSchema.pm
+          perl -Istub -Isrc -c src/PVE/Storage/Custom/StorwizePlugin.pm
+          perl -Istub -Isrc -c src/PVE/Storage/Custom/FlashSystemPlugin.pm
+
+      - name: No private keys or credentials in the history
+        run: |
+          if git log -p --all | grep -n -E 'BEGIN (RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|xox[baprs]-'; then
+            echo "secret pattern found"; exit 1
+          fi

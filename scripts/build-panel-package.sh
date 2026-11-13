@@ -13,18 +13,30 @@ CARBON_VER=1.118.0; PLEX_SANS=1.1.0; PLEX_MONO=2.5.0
 VERSION=$(sed -n 's/^VERSION = "\([0-9.]*\)"$/\1/p' "$P/app/main.py")
 [ -n "$VERSION" ] || { echo "VERSION not found in panel/app/main.py" >&2; exit 1; }
 
+# Third-party assets, pinned by the sha512 the npm registry publishes for each tarball: the panel
+# package is signed afterwards, so nothing unverified may get into it.
+NPM=(
+  "@carbon/styles/-/styles-$CARBON_VER.tgz sha512-/a5FktRWkAtrWmWMPO9tpc+GKX91dctdKXFL/pk02BJg47NZxhGCwFBJTDGeLvuEZnlkYaN5nUJXBi6vj4oKjQ=="
+  "@ibm/plex-sans/-/plex-sans-$PLEX_SANS.tgz sha512-WPgvO6Yfj2w5YbhyAr1tv95RUz4LRJlqN+CmYvBglabXteufP1D1E9BABMde+ZIKdRbFJDoKF5eQzfhpnbgZcQ=="
+  "@ibm/plex-mono/-/plex-mono-$PLEX_MONO.tgz sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w=="
+)
+fetch_npm() {   # <path> <integrity> <dest dir>: download to a file, check, then extract safely
+    local f="$3.tgz" want got
+    curl -fsSL -o "$f" "https://registry.npmjs.org/$1"
+    want="${2#sha512-}"; got=$(openssl dgst -sha512 -binary "$f" | base64 -w0)
+    [ "$got" = "$want" ] || { echo "integrity check failed for $1" >&2; exit 1; }
+    if tar -tzf "$f" | grep -q -E '^/|(^|/)\.\.(/|$)'; then echo "unsafe path in $1" >&2; exit 1; fi
+    mkdir -p "$3" && tar --no-same-owner --no-same-permissions -xzf "$f" -C "$3"
+}
 if [ ! -f "$VENDOR/carbon.min.css" ]; then
     mkdir -p "$VENDOR/fonts"; tmp=$(mktemp -d)
-    curl -fsSL "https://registry.npmjs.org/@carbon/styles/-/styles-$CARBON_VER.tgz" | tar xz -C "$tmp"
+    fetch_npm ${NPM[0]} "$tmp/c"; fetch_npm ${NPM[1]} "$tmp/s"; fetch_npm ${NPM[2]} "$tmp/m"
     # drop the @font-face rules that point to the IBM CDN (the panel serves the fonts itself)
     python3 -I -c 'import re,sys; s=open(sys.argv[1]).read(); open(sys.argv[2],"w").write(re.sub(r"@font-face\{[^}]*\}","",s))' \
-        "$tmp/package/css/styles.min.css" "$VENDOR/carbon.min.css"
-    mkdir -p "$tmp/s" "$tmp/m"
-    curl -fsSL "https://registry.npmjs.org/@ibm/plex-sans/-/plex-sans-$PLEX_SANS.tgz" | tar xz -C "$tmp/s"
-    curl -fsSL "https://registry.npmjs.org/@ibm/plex-mono/-/plex-mono-$PLEX_MONO.tgz" | tar xz -C "$tmp/m"
+        "$tmp/c/package/css/styles.min.css" "$VENDOR/carbon.min.css"
     for w in Light Regular SemiBold; do cp "$tmp/s/package/fonts/complete/woff2/IBMPlexSans-$w.woff2" "$VENDOR/fonts/"; done
     cp "$tmp/m/package/fonts/complete/woff2/IBMPlexMono-Regular.woff2" "$VENDOR/fonts/"
-    cp "$tmp/package/LICENSE" "$VENDOR/LICENSE-carbon" 2>/dev/null || true
+    cp "$tmp/c/package/LICENSE" "$VENDOR/LICENSE-carbon" 2>/dev/null || true
     rm -rf "$tmp"
 fi
 

@@ -24,6 +24,9 @@ echo "---- public key (add it to the storage user) ----------"
 cat "$KEY.pub"
 echo "---------------------------------------------------------"
 echo "GUI: Access > Users > Create User (Administrator group) > SSH Public Key"
+echo "Administrator is the smallest role that covers the plugin (it removes volumes, mappings and"
+echo "snapshots). Never Security Administrator: it could remove Safeguarded snapshots. Whoever holds"
+echo "this key controls the volumes of the array - see Security in the README."
 echo "CLI: scp ${KEY##*/}.pub superuser@<ip>:/tmp/ && svctask mkuser -name pveplugin -usergrp Administrator -keyfile /tmp/${KEY##*/}.pub"
 
 if [ -n "$ADDR" ]; then

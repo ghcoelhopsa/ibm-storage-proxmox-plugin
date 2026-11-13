@@ -7,6 +7,26 @@
 - When the panel is configured, the login screen goes back to the standard one at once.
 - README: how to read the code from the node with `pct exec <ctid> -- cat /var/lib/swpanel/setup-code`.
 
+Security (audit of 2026-11-13)
+- REST: the pinned certificate fingerprint is now enforced. Before, the TLS library ignored the pin
+  because verification was off, and any certificate was accepted.
+- REST without a pin requires a certificate valid under the system CAs; the array password never
+  goes over an unverified connection. A storage that moves from SSH to REST (password added later)
+  gets its certificate pinned at that moment, as when it is added.
+- Appliance image signed with the release key; the README checks the signature before `pct restore`.
+- Carbon and IBM Plex tarballs pinned by sha512 and extracted only after the check, rejecting
+  absolute or `..` paths.
+- Panel: sign-out requires the CSRF header; failed sign-ins limited per address and per account;
+  the realm list is cached and counts against the sign-in limit; expired sessions and old failed
+  sign-ins are pruned every 20 seconds.
+- Scripts: storage ids validated and values passed as data in `panel/deploy.sh` and
+  `scripts/collect-info.sh` (no `eval`); the plugin validates the storage id in the password path;
+  the panel quotes every argument of the snapshot backup helper.
+- README: threat model and the array role (Administrator, never Security Administrator).
+- SECURITY.md with private reporting and the release key fingerprint; CI with shellcheck, bandit,
+  Perl, Python and JavaScript syntax and a secret pattern scan; Dependabot for the workflow actions.
+- Lab addresses in the documentation replaced by documentation ranges (RFC 5737).
+
 ## 0.3.5-beta - 2026-11-13
 - Panel update from the panel: the new **Updates** page lists the newer releases with their notes
   and installs the chosen one with one click. Only the panel code is replaced; the container, its

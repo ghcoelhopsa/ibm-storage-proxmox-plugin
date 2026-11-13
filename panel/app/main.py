@@ -73,7 +73,9 @@ WIZARDS = {}           # wid -> state of an "add storage" wizard
 CACHE = {}             # key -> (ts, value)
 SESSION_IDLE = 2 * 3600
 SESSION_MAX = 12 * 3600
-LOGIN_FAILS = {}          # ip -> [timestamps]
+LOGIN_FAILS = {}          # "ip:<addr>" and "user:<user@realm>" -> [timestamps of failed sign-ins]
+LOGIN_WINDOW, LOGIN_MAX_IP, LOGIN_MAX_USER = 300, 8, 20
+REALMS_CACHE = [0.0, None]
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,62}$")
 STOREID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,30}$")
 PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,15}$")
@@ -143,6 +145,16 @@ def drop_cache(prefix=""):
     for k in list(CACHE):
         if k.startswith(prefix):
             CACHE.pop(k, None)
+
+
+def purge_login_fails():
+    now = time.time()
+    for k, v in list(LOGIN_FAILS.items()):
+        v = [t for t in v if now - t < LOGIN_WINDOW]
+        if v:
+            LOGIN_FAILS[k] = v
+        else:
+            LOGIN_FAILS.pop(k, None)
 
 
 def purge_sessions():
@@ -403,11 +415,24 @@ async def setup_save(request: Request):
 
 
 @app.get("/api/realms")
-def realms():
+def realms(request: Request):
+    """Needed by the sign-in page, so it answers without a session: kept for 5 minutes, and the
+    Proxmox call counts against the sign-in limit of the client address."""
+    if time.time() - REALMS_CACHE[0] < 300 and REALMS_CACHE[1] is not None:
+        return REALMS_CACHE[1]
+    ip = request.client.host if request.client else "?"
+    k = f"ip:{ip}"
+    fails = [t for t in LOGIN_FAILS.get(k, []) if time.time() - t < LOGIN_WINDOW]
+    if len(fails) >= LOGIN_MAX_IP:
+        err(429, "too many attempts - wait 5 minutes")
+    LOGIN_FAILS[k] = fails + [time.time()]
     try:
-        return [{"realm": r["realm"], "comment": r.get("comment", "")} for r in pve.realms()]
+        out = [{"realm": r["realm"], "comment": r.get("comment", "")} for r in pve.realms()]
     except Exception as e:
         err(502, f"Proxmox unreachable: {e}")
+    LOGIN_FAILS[k] = fails
+    REALMS_CACHE[:] = [time.time(), out]
+    return out
 
 
 @app.post("/api/login")
@@ -415,23 +440,26 @@ async def login(request: Request, response: Response):
     if request.headers.get("x-requested-with") != "swpanel":
         err(403, "request refused")
     purge_sessions()
+    purge_login_fails()
     ip, now = request.client.host if request.client else "?", time.time()
-    fails = [t for t in LOGIN_FAILS.get(ip, []) if now - t < 300]
-    LOGIN_FAILS[ip] = fails
-    if len(fails) >= 8:
-        err(429, "too many attempts - wait 5 minutes")
     body = await request.json()
     user, realm = str(body.get("username", ""))[:128], str(body.get("realm", "pam"))[:64]
     if not re.match(r"^[A-Za-z0-9_.@-]+$", user) or not re.match(r"^[A-Za-z0-9_.-]+$", realm):
         err(400, "invalid user or realm")
+    # per address, and per account: attempts spread over many addresses still slow down
+    kip, kuser = f"ip:{ip}", f"user:{user.lower()}@{realm.lower()}"
+    if len(LOGIN_FAILS.get(kip, [])) >= LOGIN_MAX_IP or len(LOGIN_FAILS.get(kuser, [])) >= LOGIN_MAX_USER:
+        err(429, "too many attempts - wait 5 minutes")
     try:
         p = pve.login(user, str(body.get("password", "")), realm)
     except PVEError as e:
-        fails.append(now)
+        for k in (kip, kuser):
+            LOGIN_FAILS.setdefault(k, []).append(now)
         err(401, str(e))
     except Exception as e:
         err(502, f"Proxmox unreachable: {e}")
-    LOGIN_FAILS.pop(ip, None)
+    LOGIN_FAILS.pop(kip, None)
+    LOGIN_FAILS.pop(kuser, None)
     s = {"pve": p, "seen": now, "created": now, "privs_at": now}
     s["privs"] = pve.privileges(p, "/")
     if "Sys.Audit" not in s["privs"]:
@@ -444,6 +472,8 @@ async def login(request: Request, response: Response):
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
+    if request.headers.get("x-requested-with") != "swpanel":
+        err(403, "request refused")
     SESSIONS.pop(request.cookies.get("swsid", ""), None)
     response.delete_cookie("swsid")
     return {}
@@ -2668,7 +2698,7 @@ async def backup_snapshot_cleanup(request: Request, s=Depends(admin)):
     log = []
     for v in g["volumes"]:
         for cmd in ("unmap", "delete"):
-            rc, o, e = nodessh.run(ip, f"perl {CBT_DIR}/sw-snap.pl {cmd} {c['storage']} {v['volname']} {snap}", 180)
+            rc, o, e = nodessh.run(ip, f"perl {CBT_DIR}/sw-snap.pl {sh(cmd)} {sh(c['storage'])} {sh(v['volname'])} {sh(snap)}", 180)
             log.append({"volume": v["volname"], "step": cmd, "rc": rc, "out": (o + e).strip()[-300:]})
     drop_cache()
     bad = [x for x in log if x["rc"] != 0 and x["step"] == "delete"]
@@ -2752,9 +2782,15 @@ def tls_reset(s=Depends(admin)):
 
 def warmer():
     """Keeps each array's data ready while someone is using the panel (and every 5 min when idle),
-    so the pages open without waiting for the array."""
+    so the pages open without waiting for the array. Also drops expired sessions and old failed
+    sign-ins, so neither grows without bound."""
     last = 0
     while True:
+        try:
+            purge_sessions()
+            purge_login_fails()
+        except Exception:
+            pass
         try:
             active = any(time.time() - x.get("seen", 0) < 900 for x in list(SESSIONS.values()))
             if active or time.time() - last > 300:

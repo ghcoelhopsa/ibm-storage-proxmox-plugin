@@ -57,16 +57,18 @@ EOS
 
 # --- migration of existing storages (plugin key -> panel) ---
 for st in "${IMPORT[@]}"; do
+    [[ "$st" =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]] || { echo "invalid storage id: $st" >&2; continue; }
     k="/etc/pve/priv/storwize/${st}_id_rsa"
     [ -f "$k" ] || { echo "key $k does not exist" >&2; continue; }
     pct push "$CT" "$k" "/var/lib/swpanel/keys/${st}_id_rsa" --perms 600
     pct exec "$CT" -- chown swpanel:swpanel "/var/lib/swpanel/keys/${st}_id_rsa"
-    addr=$(perl -MPVE::Storage -e "print PVE::Storage::config()->{ids}->{'$st'}->{'sw-address'}")
+    addr=$(ST="$st" perl -MPVE::Storage -e 'print PVE::Storage::config()->{ids}->{$ENV{ST}}->{"sw-address"}')
+    user=$(ST="$st" perl -MPVE::Storage -e 'print PVE::Storage::config()->{ids}->{$ENV{ST}}->{"sw-user"}')
+    [[ "$addr" =~ ^[A-Za-z0-9_.:-]+$ && "$user" =~ ^[A-Za-z0-9_.@-]+$ ]] || { echo "unexpected address or user for $st" >&2; continue; }
     grep "^$addr " /etc/pve/priv/storwize/known_hosts > /tmp/.kh.$$ || true
     pct push "$CT" /tmp/.kh.$$ /tmp/kh.import; rm -f /tmp/.kh.$$
-    pct exec "$CT" -- bash -c "f=/var/lib/swpanel/array_known_hosts; touch \$f; grep -v '^$addr ' \$f > \$f.n || true; cat /tmp/kh.import >> \$f.n; mv \$f.n \$f; rm /tmp/kh.import; chown swpanel:swpanel \$f; chmod 600 \$f"
-    user=$(perl -MPVE::Storage -e "print PVE::Storage::config()->{ids}->{'$st'}->{'sw-user'}")
-    pct exec "$CT" -- python3 -c "import json,os; f='/var/lib/swpanel/arrays.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['$st']={'address':'$addr','user':'$user'}; json.dump(d,open(f,'w'))"
+    pct exec "$CT" -- bash -c 'f=/var/lib/swpanel/array_known_hosts; touch "$f"; grep -v -F "$1 " "$f" > "$f.n" || true; cat /tmp/kh.import >> "$f.n"; mv "$f.n" "$f"; rm /tmp/kh.import; chown swpanel:swpanel "$f"; chmod 600 "$f"' _ "$addr"
+    pct exec "$CT" -- python3 -I -c 'import json,os,sys; f="/var/lib/swpanel/arrays.json"; d=json.load(open(f)) if os.path.exists(f) else {}; d[sys.argv[1]]={"address":sys.argv[2],"user":sys.argv[3]}; json.dump(d,open(f,"w"))' "$st" "$addr" "$user"
     pct exec "$CT" -- chown swpanel:swpanel /var/lib/swpanel/arrays.json
     echo "storage '$st' imported into the panel"
 done

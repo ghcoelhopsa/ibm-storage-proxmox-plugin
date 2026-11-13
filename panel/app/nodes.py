@@ -231,7 +231,7 @@ class NodeSSH:
 
     @staticmethod
     def _exec(c, cmd, timeout=600):
-        _, out, err = c.exec_command(cmd, timeout=timeout)
+        _, out, err = c.exec_command(cmd, timeout=timeout)  # nosec B601 - fixed scripts; every value is quoted with sh()
         o, e = out.read().decode(errors="replace"), err.read().decode(errors="replace")
         rc = out.channel.recv_exit_status()
         return rc, o, e

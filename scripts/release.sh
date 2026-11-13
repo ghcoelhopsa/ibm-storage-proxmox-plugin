@@ -44,7 +44,10 @@ openssl pkeyutl -verify -pubin -inkey "$REPO/panel/app/release-key.pem" -rawin -
 ASSETS=("$PKG" "$PKG.sig" "$PKG.sha256")
 if [ -n "$APPL" ]; then
     (cd "$(dirname "$APPL")" && sha256sum "$(basename "$APPL")") > "$OUT/$(basename "$APPL").sha256"
-    ASSETS+=("$APPL" "$OUT/$(basename "$APPL").sha256")
+    # the image carries the same code plus a whole system: signed with the same key as the package
+    openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$APPL" -out "$OUT/$(basename "$APPL").sig"
+    openssl pkeyutl -verify -pubin -inkey "$REPO/panel/app/release-key.pem" -rawin -in "$APPL" -sigfile "$OUT/$(basename "$APPL").sig" >/dev/null
+    ASSETS+=("$APPL" "$OUT/$(basename "$APPL").sha256" "$OUT/$(basename "$APPL").sig")
 fi
 echo "release $TAG:"; printf '  %s\n' "${ASSETS[@]}"; echo "  notes: $NOTES"
 [ $DRY = 1 ] && { echo "dry run: nothing published"; exit 0; }
