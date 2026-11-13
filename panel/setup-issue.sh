@@ -18,7 +18,7 @@ fi
 install -d -m 0700 -o swpanel -g swpanel $D $D/keys $D/update
 if [ -s $D/config.json ] || [ -s /etc/swpanel/config.json ]; then
     rm -f $D/setup-code
-    [ -f /etc/issue.swpanel-orig ] && cp /etc/issue.swpanel-orig /etc/issue
+    [ -f /etc/issue.swpanel-orig ] && cp /etc/issue.swpanel-orig /etc/issue && agetty --reload 2>/dev/null
     exit 0
 fi
 if [ ! -s $D/setup-code ]; then
@@ -28,4 +28,7 @@ if [ ! -s $D/setup-code ]; then
 fi
 [ -f /etc/issue.swpanel-orig ] || cp /etc/issue /etc/issue.swpanel-orig 2>/dev/null
 printf 'IBM Storage Plugin Proxmox (beta)\n\n  Panel:             https://%s/\n  Installation code: %s\n\n' "${ip:-<container address>}" "$(cat $D/setup-code)" > /etc/issue
+# the login prompt may already be on screen (it starts before the network is up): redraw it so
+# the console shows the address and the code without logging in
+agetty --reload 2>/dev/null
 exit 0
