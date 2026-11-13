@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.7-beta - 2026-11-13
+- Panel update: the progress window no longer stays on "waiting for the installer". The panel
+  restarts to install the update and the sessions do not survive it; the window now follows the
+  update through the public status of the panel and, when the new version answers, reloads the
+  Updates page (sign in again if asked). A failed update is shown the same way.
+- The progress window runs the code of the version being replaced, so the fix applies to updates
+  from 0.3.7 on. Updating 0.3.6 to 0.3.7 can still leave the window waiting: close it and sign in.
+
 ## 0.3.6-beta - 2026-11-13
 - First boot of the appliance: the container console shows the panel address and the installation
   code on the login screen as soon as the panel writes them, without logging in. Before, the login
