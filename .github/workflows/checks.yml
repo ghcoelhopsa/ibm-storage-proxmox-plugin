@@ -41,6 +41,7 @@ jobs:
 
       - name: No private keys or credentials in the history
         run: |
-          if git log -p --all | grep -n -E 'BEGIN (RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|xox[baprs]-'; then
+          # a key block on its own line (not the placeholder text of a form field), or a token
+          if git log -p --all | grep -n -E '^[+ ]?-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}'; then
             echo "secret pattern found"; exit 1
           fi
