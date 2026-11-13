@@ -1,9 +1,8 @@
 # Storage Virtualize 8.5.2+ and 9.1: Safeguarded snapshots, DR and storage partitions
 
-Status: **code ready, not validated on 8.x hardware.** Everything here was written from the
-documentation and exercised only against a simulator (`panel/dev/fake8.py`). The current lab
-(V7000 Gen1, 7.8.1.6) has no volume group, Safeguarded snapshot or policy-based replication.
-Section 6 is the runbook to validate once a new storage is available.
+Status: volume group snapshots, Safeguarded snapshots and snapshot policies validated on a
+FlashSystem 7600, firmware 9.1.2, with a two-node Proxmox cluster (2026-11-13). Policy-based
+replication and DR need a second array and are the next step; section 6 is the runbook.
 
 ## 1. Sources
 

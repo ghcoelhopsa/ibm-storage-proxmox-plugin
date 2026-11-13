@@ -26,29 +26,54 @@ It has three parts:
 | **Panel appliance** | [ibm-storage-plugin-proxmox-panel-0.3.3-beta.tar.zst](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases/download/v0.3.3-beta/ibm-storage-plugin-proxmox-panel-0.3.3-beta.tar.zst) (LXC container image, Debian 13, 174 MB). Restore it with `pct restore`; the panel then installs the plugin on the nodes. |
 | **All releases** | [Releases page](https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin/releases), with the checksum of each image |
 | **Source** | `git clone https://github.com/ghcoelhopsa/ibm-storage-proxmox-plugin.git` |
-| **Runs on** | Proxmox VE 9.x (developed and tested on 9.2) |
+| **Runs on** | Proxmox VE 9.x (tested on 9.2, single node and two-node cluster) |
 | **Arrays** | IBM Storage Virtualize 7.8 or later: Storwize, FlashSystem, SAN Volume Controller |
 
 The steps are in [Quick start](#quick-start).
 
 ## Status
 
-The project is in beta. What has and has not been run on real hardware:
+Beta. Validated on two labs:
 
-| Area | State |
+| Lab | Array | Proxmox |
+|---|---|---|
+| 1 | Storwize V7000 Gen1, firmware 7.8.1.6, FlashCopy snapshots | VE 9.2, single node |
+| 2 | FlashSystem 7600, firmware 9.1.2, volume group snapshots | VE 9.2, two-node cluster |
+
+| Area | Validated |
 |---|---|
-| Plugin over SSH/CLI, Fibre Channel, FlashCopy snapshots, consistency groups, online resize, QoS | Tested on a Storwize V7000 Gen1, firmware 7.8.1.6, Proxmox VE 9.2 |
-| Web panel, performance history, FC optical levels, node preparation | Tested on the same lab |
-| Snapshot-based backup to PBS (full, incremental, restore, fallback) | Tested on the same lab |
-| REST backend (firmware 8.x) | Written, not tested |
-| Volume group snapshots, Safeguarded snapshots, policy-based replication and DR (8.5.2+), storage partitions (8.6.1+ / 9.1) | Written from IBM documentation, exercised only against a simulator |
-| NVMe over TCP | Written, not tested |
-| iSCSI | Written, not tested |
-| Clusters with more than one node (live migration, HA) | Not tested |
+| Disks: create, import, expand online, move, full clone, delete with trash | Labs 1 and 2 |
+| Fibre Channel multipath (ALUA); path loss and return | Labs 1 and 2 (path loss: lab 2) |
+| Snapshots, rollback and delete: FlashCopy consistency groups (7.8) and volume groups (8.5+/9.x) | Labs 1 and 2 |
+| Live migration between nodes, including under load and with a Safeguarded policy | Lab 2 |
+| Safeguarded snapshot policies: create, assign to VMs, restore over the VM or as a new VM | Lab 2 |
+| New VM from a volume group snapshot: thinclone or clone | Lab 2 |
+| Backup from the array snapshot to PBS: full, incremental, after migration, bandwidth limit | Labs 1 and 2 |
+| Regular Proxmox backup and restore through PBS | Lab 2 |
+| Web panel: inventory, performance and latency history, FC optical levels (QLogic and Emulex), node preparation, QoS | Labs 1 and 2 |
+| Many operations at the same time (backups, snapshots, migrations, clones, moves) | Lab 2 |
 
-Anything marked "not tested" should be treated as a starting point for validation, not as a
-feature you can rely on. See [docs/FS8X-SAFEGUARDED-DR.md](docs/FS8X-SAFEGUARDED-DR.md),
-[docs/NVME-TCP.md](docs/NVME-TCP.md) and [docs/TEST-PLAN.md](docs/TEST-PLAN.md).
+Next to validate: disaster recovery with policy-based replication (needs a second array).
+
+Measured numbers and charts: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Test log:
+[docs/TEST-PLAN.md](docs/TEST-PLAN.md).
+
+## Performance
+
+FlashSystem 7600, 16 Gb FC, one VM with one virtual disk (details in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+| | |
+|---|---|
+| Random read / write 4K | 118,615 / 113,456 IOPS, about 1.1 ms |
+| Sequential read / write 1M | 1,647 / 1,647 MB/s |
+| Live migration | 69–110 ms downtime, I/O never stops |
+| Snapshot of a running VM with 2 disks | 2.7 s |
+| Backup from the array snapshot | full 140 GiB in 6 min 41 s; incremental reads only what changed |
+
+![IOPS during four live migrations](docs/images/perf-migration-iops.svg)
+
+![Data read per backup](docs/images/perf-backup-read.svg)
 
 ## How it works
 
@@ -285,12 +310,21 @@ More about deployment and files: [panel/README.md](panel/README.md).
 Regular Proxmox backup reads every disk through QEMU while the VM runs. This project adds a second
 path for VMs on plugin storage:
 
-1. QEMU keeps a dirty bitmap of the blocks written since the last backup.
-2. The array takes a FlashCopy snapshot of all the VM's disks at once; the guest agent freezes the
-   filesystems for that moment. The VM is not paused.
-3. The snapshot is mapped to the node and only the changed blocks are read from it and uploaded to
-   Proxmox Backup Server, in the normal PBS format.
+1. QEMU keeps a dirty bitmap of the blocks written since the last backup. The bitmap moves with
+   the VM in a live migration.
+2. The array takes a snapshot of all the VM's disks at once: a FlashCopy consistency group (7.8) or
+   a snapshot of the VM's volume group (`sw-snapmode volumegroup`, 8.5+/9.x). The guest agent
+   freezes the filesystems for that moment. The VM is not paused.
+3. The snapshot is mapped to the node running the backup only (a thinclone in volume group mode)
+   and only the changed blocks are read from it and uploaded to Proxmox Backup Server, in the
+   normal PBS format.
 4. The snapshot is unmapped and removed.
+
+The VM is locked (`lock: backup`) while the backup runs, as with vzdump, so it cannot be migrated
+in the middle. The backup state lives in `/etc/pve`, so the next backup stays incremental on any
+node. Upload speed follows the Proxmox backup bandwidth limit (`/etc/vzdump.conf`, datacenter or
+storage `bwlimit`); on a 1 GbE network shared with corosync set one, for example
+`pvesh set /cluster/options --bwlimit backup=61440` (60 MiB/s).
 
 The result appears in Proxmox as a normal backup of the VM on that PBS storage and is restored the
 usual way. If the snapshot path fails, the job falls back to the regular Proxmox backup.
@@ -322,8 +356,11 @@ an array volume with Safeguarded snapshots.
 
 ## Limitations
 
-- No templates or linked clones. Full clones work.
-- Resize is refused while the disk has FlashCopy snapshots.
+- No templates or linked clones. Full clones work, also from a snapshot in volume group mode.
+- With FlashCopy snapshots (7.8), resize is refused while the disk has snapshots.
+- Snapshot policies run on the array clock: keep the array on NTP.
+- Taking a Safeguarded policy off a volume group, or deleting a Safeguarded snapshot before it
+  expires, needs the array Security Administrator role.
 - Rollback needs the VM stopped, as always in Proxmox. The panel can start it again afterwards.
 - Removing a volume cleans up the local device only on the node that ran the command; on other
   nodes use `scripts/cleanup-stale-paths.sh`.
@@ -361,7 +398,8 @@ Names inside the code keep their history: the Proxmox storage types are `storwiz
 ## Documentation
 
 - [docs/V7000-SETUP.md](docs/V7000-SETUP.md): preparing the array (user, key, pool, hosts)
-- [docs/TEST-PLAN.md](docs/TEST-PLAN.md): what was tested and what is pending
+- [docs/TEST-PLAN.md](docs/TEST-PLAN.md): test log
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md): measured performance, with charts
 - [docs/FS8X-SAFEGUARDED-DR.md](docs/FS8X-SAFEGUARDED-DR.md): Storage Virtualize 8.5.2+ and 9.1:
   Safeguarded snapshots, replication and DR, storage partitions
 - [docs/NVME-TCP.md](docs/NVME-TCP.md): NVMe over TCP
@@ -370,13 +408,11 @@ Names inside the code keep their history: the Proxmox storage types are `storwiz
 
 ## Roadmap
 
-- Validate the REST backend, volume group snapshots, Safeguarded snapshots and replication on an
-  8.x or 9.x system.
-- Validate NVMe over TCP, and add the LVM filter, backup and statistics paths for it.
+- Disaster recovery with policy-based replication between two arrays.
+- NVMe over TCP: LVM filter, backup and statistics paths.
 - Several child pools in one storage, with online volume moves between them.
-- Clone and thin clone from array snapshots (file-level recovery, fast VM clones).
+- File-level recovery from array snapshots.
 - Alerts by e-mail or webhook.
-- Multi-node clusters: live migration and HA testing.
 
 ## License
 

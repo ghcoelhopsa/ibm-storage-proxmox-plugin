@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 222" width="860" height="222" role="img" aria-label="Data read from the array per backup (VM with 140 GiB of disks)"><style>
+  .bg { fill: #fcfcfb } .t1 { fill: #0b0b0b } .t2 { fill: #52514e } .grid { stroke: #e4e3df }
+  .axis { stroke: #b9b8b2 } .s1 { fill: #2a78d6 } .s1l { stroke: #2a78d6 } .band { fill: #eb6834; opacity: .12 }
+  .s2 { fill: #eb6834 }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #1a1a19 } .t1 { fill: #f0efec } .t2 { fill: #c3c2b7 } .grid { stroke: #34332f }
+    .axis { stroke: #5a5953 } .s1 { fill: #3987e5 } .s1l { stroke: #3987e5 } .band { fill: #d95926; opacity: .22 }
+    .s2 { fill: #d95926 }
+  }
+  text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif }
+</style><rect class="bg" width="860" height="222" rx="8"/><text class="t1" x="24" y="34" font-size="18" font-weight="600">Data read from the array per backup (VM with 140 GiB of disks)</text><text class="t2" x="24" y="56" font-size="13">Backup from the array snapshot to Proxmox Backup Server · incremental reads only what changed</text><text class="t1" x="288" y="96.0" font-size="14" text-anchor="end">Full (first backup)</text><rect class="s1" x="300" y="78" width="428.6" height="26" rx="4"/><text class="t1" x="736.6" y="96.0" font-size="14" font-weight="600">140 GiB</text><text class="t1" x="288" y="136.0" font-size="14" text-anchor="end">Incremental, after live migration</text><rect class="s1" x="300" y="118" width="6.3" height="26" rx="4"/><text class="t1" x="314.3" y="136.0" font-size="14" font-weight="600">2.0 GiB</text><text class="t1" x="288" y="176.0" font-size="14" text-anchor="end">Incremental, during a load test</text><rect class="s1" x="300" y="158" width="12.4" height="26" rx="4"/><text class="t1" x="320.4" y="176.0" font-size="14" font-weight="600">4.0 GiB</text><line class="axis" x1="300" x2="300" y1="72" y2="204" stroke-width="1"/></svg>

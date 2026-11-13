@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.4-beta - 2026-11-13
+Validated on an IBM FlashSystem 7600 (firmware 9.1.2) with a two-node Proxmox VE 9.2 cluster.
+Measured numbers: docs/PERFORMANCE.md.
+
+Snapshots and recovery (volume group mode, 8.5+/9.x)
+- New VM from a volume group snapshot, as a thinclone (immediate, shares data with the snapshot) or
+  a clone (immediate, the array copies the data in the background). Panel: Protection tab and the
+  VMs page.
+- Full clone from a snapshot in Proxmox (`qm clone --snapname`): the snapshot is read through a
+  temporary thinclone, removed with the snapshot or after a day.
+- Snapshot policies in the panel: create (frequency, retention, start time, Safeguarded), assign
+  to several VMs at once, delete. The next policy snapshot of each VM is shown.
+- The VMs page lists the array snapshots of each VM, including the ones taken by a policy and the
+  Safeguarded ones, with restore over the VM and new VM from the snapshot.
+- Anomaly status of a snapshot (9.x threat detection) is shown when the array reports one.
+- Snapshot names up to 63 characters (policy snapshots are named `snapshot-<UUID>`).
+- Errors of the Security Administrator role (CMMVC8851E, CMMVC8853E) are explained in the panel.
+
+Disks
+- Trash also in volume group mode: the disk leaves the VM's volume group and goes to the trash;
+  restoring it puts it back in the group.
+- Thin volumes are created without the per-volume space alert at 80 % of their size; the pool alert
+  is the one that matters with autoexpand.
+- Temporary thinclones are never listed as disks of a VM.
+
+Backup from the array snapshot
+- Volume group mode: `addsnapshot` of the VM's group and a thinclone mapped only to the node that
+  runs the backup. Works with host clusters.
+- The VM is locked (`lock: backup`) during the backup, as with vzdump.
+- Backup state in `/etc/pve`: incremental on any node after a live migration.
+- Follows the Proxmox backup bandwidth limit (vzdump.conf, datacenter, storage) or `--bwlimit`;
+  only data actually sent to PBS counts.
+- Bitmaps left by an interrupted run are merged into the next one.
+
+Panel
+- Latency in microseconds in every chart, with the unit on the axis.
+- FC optical levels of Emulex HBAs (`lpfc_xcvr_data`), besides QLogic.
+- Direct-attach links of 8.x/9.x arrays are matched to the node HBA by the fabric name.
+- Policy list of a volume group read correctly on 9.1 (`name` column).
+
+
 ## 0.3.3-beta - 2026-11-11
 - Trash: a disk removed in Proxmox (including the disks of a destroyed VM) is unmapped and renamed
   `<prefix>-trash<time>-<volume>` instead of deleted, and kept for `sw-trash-days` (default 7).
