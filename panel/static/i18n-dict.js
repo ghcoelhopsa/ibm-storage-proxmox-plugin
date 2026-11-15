@@ -194,6 +194,7 @@
     ["no data", "sem dados", "sin datos"],
     ["SFP without DDM", "SFP sem DDM", "SFP sin DDM"],
     ["New VM", "Nova VM", "Nueva VM"],
+    ["Only VMs with disks on plugin storage use the snapshot; the others fall back to the regular backup.", "Só as VMs com discos na storage do plugin usam o snapshot; as outras caem no backup normal.", "Solo las VM con discos en el storage del plugin usan el snapshot; las demás pasan al backup normal."],
     ["Settings", "Configurações", "Configuración"],
     ["Backup settings", "Configurações de backup", "Configuración de backup"],
     ["Simultaneous snapshot backups per node", "Backups via snapshot simultâneos por nó", "Backups por snapshot simultáneos por nodo"],
