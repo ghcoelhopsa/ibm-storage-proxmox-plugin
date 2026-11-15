@@ -67,3 +67,10 @@ the tests marked with (auto).
 | T60 | bottleneck analysis | full backup of 140 GiB already in the PBS (servidor02, 10 GbE) and of 20 GiB with the PBS as a local VM | proxy 82 % (hashing; 80 MiB new) / source 71 %; network empty for the local PBS | Passed |
 | T61 | latency control: start | start limit below the array latency | backup queued with the reason; released when the limit goes back up | Passed |
 | T62 | latency control: slow down | slow-down limit below the measured latency during a full backup | readers 4 → 2, wait recorded in the report | Passed |
+| T63 | file restore from a Safeguarded snapshot | `file_restore.py start` on a policy snapshot of VM 9998; list, download a file and a folder | session in 5 s; ext4 tree listed; file and .zip match | Passed (9.1.2) |
+| T64 | file restore: VM on the other node, two disks | snapshot of VM 9999 (running on servidor02) opened on servidor01 | both disks listed (drive-scsi0, drive-scsi1); disk without a file system shown empty | Passed |
+| T65 | file restore: read-only | `blockdev --getro` on the thinclone device during a session | 1 on the multipath device and its paths; QEMU drive read-only | Passed |
+| T66 | file restore: cleanup | close the session; kill the restore VM; leave it idle 10 min | thinclone group removed from the array each time | Passed |
+| T67 | file restore: large download through the panel | 1 GiB and 3 GiB streamed over the panel SSH channel | complete and identical (sha256); no stop at 512 MiB | Passed |
+| T68 | file restore: download in progress when the window closes | stop during a 285 MiB zip download | download completes; session and thinclone removed 5 s after | Passed |
+| T69 | file restore: Windows NTFS and XFS guests | Restore files on a Windows VM and an XFS VM snapshot | trees listed, file downloaded | Pending: no such VMs in the lab |

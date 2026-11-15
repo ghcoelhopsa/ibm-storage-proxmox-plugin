@@ -49,6 +49,7 @@ Beta. Validated on two labs:
 | Safeguarded snapshot policies: create, assign to VMs, restore over the VM or as a new VM | Lab 2 |
 | New VM from a volume group snapshot: thinclone or clone | Lab 2 |
 | Backup from the array snapshot to PBS: full, incremental, after migration, bandwidth limit | Labs 1 and 2 |
+| File restore from array snapshots, Safeguarded included (Linux ext4 guest) | Lab 2 |
 | Regular Proxmox backup and restore through PBS | Lab 2 |
 | Web panel: inventory, performance and latency history, FC optical levels (QLogic and Emulex), node preparation, QoS | Labs 1 and 2 |
 | Many operations at the same time (backups, snapshots, migrations, clones, moves) | Lab 2 |
@@ -112,6 +113,8 @@ around it.
 | Fibre Channel links with SFP optical levels and error counters | Per-disk IOPS, throughput and latency |
 | ![Backups](docs/images/backups.png) | ![Proxmox nodes](docs/images/nodes.png) |
 | Snapshot-based backups: running jobs, schedules, history | Node preparation: packages, multipath, plugin |
+| ![File restore](docs/images/file-restore.png) | ![Trash](docs/images/trash-array.png) |
+| File restore from a Safeguarded snapshot | Removed disks in the array trash |
 
 ## Requirements
 
@@ -385,6 +388,31 @@ The mark guards against mistakes; it is not immutability. Against an attacker, g
 token that can only write backups, pull the datastore from a second PBS, or keep the datastore on
 an array volume with Safeguarded snapshots.
 
+## File restore from array snapshots
+
+On **VMs**, the overflow menu of an array snapshot has **Restore files…**. It works with any
+snapshot of the VM's volume group (`sw-snapmode volumegroup`): taken by Proxmox, by the panel or by
+a policy, Safeguarded ones included.
+
+1. The array creates a thinclone of the snapshot (instant, no data copied) and maps it to one node
+   only: the node running the VM, or another node of the cluster when the VM is gone.
+2. The node marks the devices read-only and starts the Proxmox restore VM: the small VM Proxmox uses
+   for single file restore from PBS (package `proxmox-backup-restore-image`). It has its own kernel
+   and mounts the guest file systems read-only, without replaying journals (ext4, XFS, NTFS, LVM,
+   ZFS). A damaged or hostile file system in the snapshot is never parsed by the node's kernel.
+3. The panel lists disks, partitions and folders and downloads a file, or a folder as .zip or
+   .tar.zst. Nothing is mounted in the panel container.
+4. When the window closes, the restore VM stops and the thinclone is removed, as soon as the
+   downloads in progress end. A restore VM idle for 10 minutes stops by itself, and a session never
+   lasts more than 4 hours.
+
+The snapshot is not changed: it is never mapped to a host, and the thinclone the node sees is read
+only at three levels (device, QEMU and mount). Opening a snapshot takes about 10 s. Each opening
+and download is written to the panel log (`journalctl -u swpanel`) with the user.
+
+For backups already in PBS, use the **File Restore** button of Proxmox on the backup: backups made
+from the array snapshot are in the normal PBS format and Proxmox opens them the same way.
+
 ## Security
 
 ### Threat model
@@ -436,6 +464,9 @@ users with the least privilege (the panel needs `Sys.Audit` to read and `Sys.Mod
 - Legacy arrays without UNMAP (such as the V7000 Gen1) do not reclaim space freed inside a VM.
 - Proxmox file restore cannot open LVM inside a backup when two disks of the VM carry the same
   volume group identifiers (for example a cloned disk).
+- File restore from array snapshots downloads files; it does not write them back into the VM.
+  BitLocker volumes, ReFS and encrypted disks cannot be read. Not available for storages inside a
+  storage partition yet.
 
 ## Troubleshooting
 
@@ -479,7 +510,7 @@ Names inside the code keep their history: the Proxmox storage types are `storwiz
 - Disaster recovery with policy-based replication between two arrays.
 - NVMe over TCP: LVM filter, backup and statistics paths.
 - Several child pools in one storage, with online volume moves between them.
-- File-level recovery from array snapshots.
+- File restore back into the running VM (through the guest agent).
 - Alerts by e-mail or webhook.
 
 ## License

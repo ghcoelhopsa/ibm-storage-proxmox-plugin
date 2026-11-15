@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0-beta - 2026-11-15
+- File restore from array snapshots (VMs › array snapshot › **Restore files…**). Works with any
+  snapshot of the VM's volume group, Safeguarded ones included. The array gives a thinclone of the
+  snapshot to one node, and the Proxmox restore VM (the same one Proxmox uses for file restore from
+  PBS, package `proxmox-backup-restore-image`) reads the file systems with its own kernel. The panel
+  lists disks, partitions, LVM and folders, and downloads a file, or a folder as .zip or .tar.zst.
+- Read-only all the way: the snapshot itself is never mapped; the node marks the thinclone devices
+  read-only (`blockdev --setro`); QEMU opens them read-only; the restore VM mounts without
+  replaying journals. The node never mounts a guest file system.
+- The thinclone is removed when the window closes (after the downloads in progress), when the
+  restore VM stops after 10 minutes without requests, or after 4 hours in any case. Each opening
+  and download is written to the panel log with the user.
+- Prepare node (snapshot backup option) installs `proxmox-backup-restore-image` when missing and
+  the new `file_restore.py`.
+- Plugin: the hourly cleanup of snapshot access groups older than a day now removes groups with
+  several volumes (backup of a VM with several disks, file restore), not only the first volume.
+- Panel: downloads from a node are streamed; large transfers no longer stop at 512 MiB on an SSH
+  key renegotiation.
+
 ## 0.3.9-beta - 2026-11-14
 - Storage latency control for the backup from the array snapshot (Backups › Settings). The array
   volume latency is read every 15 s: above the start limit (default 20 ms) new backups wait in the

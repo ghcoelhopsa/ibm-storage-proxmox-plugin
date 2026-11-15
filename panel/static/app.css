@@ -374,3 +374,8 @@ textarea.cds--text-area.mono { width: 100%; font-size: .75rem; line-height: 1.3;
 @keyframes up-run { from { margin-left: 0; } to { margin-left: 85%; } }
 
 .bn-line { margin-top: .25rem; white-space: nowrap; } .bn-line .bn-on { font-weight: 600; color: var(--cds-text-primary); }
+
+/* file restore browser */
+.fr-crumbs { margin: .75rem 0 .5rem; font-size: .875rem; }
+.fr-crumbs a, #fr-list a { color: var(--cds-link-primary); text-decoration: none; display: inline-flex; align-items: center; gap: .375rem; }
+#fr-list { max-height: 55vh; overflow: auto; }
