@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1-beta - 2026-11-15
+- Fix: deleting a disk left its multipath map behind on the other nodes of the cluster. The disk
+  is mapped to every node, but only the node that ran the delete removed its device; on the others
+  the map stayed with dead paths, and the array can later hand the same SCSI LUN id to a new
+  volume. The plugin now removes the map on every online node before it unmaps the volume (also
+  for snapshot access, backup and file restore volumes). A node where the disk is still open
+  stops the delete, as the local node already did.
+- Partition maps made by kpartx (cloud images carry a partition table) no longer keep the map
+  from being removed.
+- Every node checks every 10 minutes for maps of volumes the array no longer maps to it (a node
+  that was offline during a delete, or maps left by older versions) and removes the ones nothing
+  holds open. `pve-ibm-storage stale-paths` lists them, `--remove` removes them now. It used to
+  look only for volumes gone from the array, so disks moved to the trash were never listed.
+
 ## 0.4.0-beta - 2026-11-15
 - File restore from array snapshots (VMs › array snapshot › **Restore files…**). Works with any
   snapshot of the VM's volume group, Safeguarded ones included. The array gives a thinclone of the

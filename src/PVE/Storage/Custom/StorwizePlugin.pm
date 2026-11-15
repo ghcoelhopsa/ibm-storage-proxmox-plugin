@@ -25,7 +25,7 @@ use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
 
-our $VERSION = '0.4.0';
+our $VERSION = '0.4.1';
 
 # Storage API this module was validated against (PVE 9.2, libpve-storage-perl 9.1).
 my $TESTED_APIVER = 14;
@@ -37,6 +37,7 @@ my $KNOWN_HOSTS = "$PRIV_DIR/known_hosts";
 my $STATUS_CACHE_TTL = 30;      # pvestatd polls every 10 s on every node
 my $SYSTEM_CACHE_TTL = 3600;
 my $DEV_WAIT         = 30;      # seconds to wait for a new multipath device
+my $ORPHAN_SWEEP_EVERY = 600;   # seconds between checks for multipath maps the array no longer maps here
 my $FC_STOP_WAIT     = 900;     # seconds to wait for a FlashCopy map to stop
 
 my $ARG_RE      = qr/^[A-Za-z0-9_.:=*%\/-]+$/;
@@ -811,6 +812,48 @@ sub device_rescan_size {
     udev_settle();
 }
 
+# Open count of a device-mapper device (sysfs has no such attribute, dmsetup does).
+sub dm_open_count {
+    my ($name) = @_;
+    my $out = '';
+    eval {
+        run_command(['/usr/sbin/dmsetup', 'info', '-c', '--noheadings', '-o', 'open', $name],
+            outfunc => sub { $out .= $_[0] }, errfunc => sub { }, noerr => 1, timeout => 30);
+    };
+    return $out =~ m/^\s*(\d+)/ ? $1 : undef;
+}
+
+# Partition maps kpartx made on top of a multipath map (cloud images carry a partition table).
+# They hold the map open, so 'multipath -f' fails while they exist. Removed only when unused.
+sub dm_remove_partmaps {
+    my ($dm) = @_;
+    for my $h (glob("/sys/block/$dm/holders/dm-*")) {
+        my $uuid = sysfs_read("$h/dm/uuid") // next;
+        next if $uuid !~ m/^part\d+-mpath-/;
+        my $name = sysfs_read("$h/dm/name") // next;
+        next if (dm_open_count($name) // 1) != 0;
+        eval {
+            run_command(['/usr/sbin/dmsetup', 'remove', '--retry', $name],
+                outfunc => sub { }, errfunc => sub { }, noerr => 1, timeout => 30);
+        };
+    }
+}
+
+# SCSI disks of a volume, also those no multipath map holds (any more).
+sub scsi_disks_of {
+    my ($uid) = @_;
+    my $want = 'naa.' . lc($uid);
+    my @out;
+    for my $b (glob('/sys/block/sd*')) {
+        my ($sd) = $b =~ m|/(sd[a-z]+)$| or next;
+        push @out, $sd if lc(sysfs_read("$b/device/wwid") // '') eq $want;
+    }
+    return @out;
+}
+
+# Removes the multipath map of a volume and its SCSI disks from this node. Must run before the
+# volume is unmapped: a map left behind keeps its dead paths, and the array can hand the same
+# SCSI LUN id to another volume later.
 sub device_remove_local {
     my ($uid) = @_;
     my $dev = uid_to_path($uid);
@@ -818,20 +861,185 @@ sub device_remove_local {
     my @slaves = -e $dev ? dm_slaves($dev) : ();
     if (-e $dev) {
         eval { run_command(['/usr/bin/blockdev', '--flushbufs', $dev], noerr => 1) };
-        my $rc = eval {
-            run_command(['/usr/sbin/multipath', '-f', $wwid],
-                outfunc => sub { }, errfunc => sub { }, noerr => 1, timeout => 60);
-        } // 1;
+        my $flush = sub {
+            return eval {
+                run_command(['/usr/sbin/multipath', '-f', $wwid],
+                    outfunc => sub { }, errfunc => sub { }, noerr => 1, timeout => 60);
+            } // 1;
+        };
+        my $rc = $flush->();
+        if ($rc != 0 && -e $dev) {
+            my ($dm) = (abs_path($dev) // '') =~ m|/dev/(dm-\d+)$|;
+            if ($dm) {
+                dm_remove_partmaps($dm);
+                $rc = $flush->();
+            }
+        }
         die "storwize: could not flush multipath map $wwid (device still in use?)\n"
             if $rc != 0 && -e $dev;
     }
-    for my $sd (@slaves) {
+    my %seen;
+    for my $sd (grep { !$seen{$_}++ } @slaves, scsi_disks_of($uid)) {
         sysfs_write("/sys/block/$sd/device/delete", "1\n") if -e "/sys/block/$sd/device/delete";
     }
     eval {
         run_command(['/usr/sbin/multipath', '-w', $wwid],
             outfunc => sub { }, errfunc => sub { }, noerr => 1);
     };
+}
+
+# The volume is mapped to every node of the cluster, so every node has a multipath map of it.
+# Removes it here and on the other online nodes. A node that is offline or unreachable is
+# skipped with a warning (orphan_sweep cleans it up later); a node where the device is in use
+# stops the removal, as it does locally.
+sub device_remove {
+    my ($uid, %param) = @_;
+    ($uid) = ($uid // '') =~ m/^([0-9A-Fa-f]{32})$/ or die "storwize: invalid vdisk_UID\n";
+    device_remove_local($uid);
+    return if $param{local_only};
+
+    my ($members, $me) = eval {
+        require PVE::Cluster;
+        require PVE::INotify;
+        PVE::Cluster::cfs_update();
+        (PVE::Cluster::get_members(), PVE::INotify::nodename());
+    };
+    return if !$members || !%$members;
+
+    my @busy;
+    for my $node (sort keys %$members) {
+        next if $node eq $me;
+        my ($n) = $node =~ m/^([A-Za-z0-9][A-Za-z0-9.-]*)$/ or next;
+        if (!$members->{$node}->{online}) {
+            warn "storwize: node $n is offline - its map of $uid is removed by the periodic cleanup\n";
+            next;
+        }
+        my $err = '';
+        my $rc = eval {
+            require PVE::SSHInfo;
+            my $info = PVE::SSHInfo::get_ssh_info($n);
+            my $cmd = PVE::SSHInfo::ssh_info_to_command($info,
+                '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
+            # one string for the remote shell; $uid is plain hex (checked above)
+            push @$cmd, "/usr/bin/perl -MPVE::Storage::Custom::StorwizePlugin -e"
+                . " 'PVE::Storage::Custom::StorwizePlugin::device_remove_local(shift)' $uid";
+            run_command($cmd, outfunc => sub { }, errfunc => sub { $err .= "$_[0]\n" },
+                noerr => 1, timeout => 120);
+        };
+        $err .= $@ if $@;
+        next if defined($rc) && $rc == 0;
+        if ($err =~ m/could not flush/) {
+            push @busy, $n;
+        } else {
+            $err =~ s/\s+$//;
+            warn "storwize: could not reach node $n to remove the map of $uid: $err\n";
+        }
+    }
+    die "storwize: multipath map of volume $uid is still in use on node(s) @busy\n" if @busy;
+}
+
+# Multipath maps of volumes of this array that the array no longer maps to this node: what is
+# left on a node that was offline (or ran an older version) when a volume was deleted elsewhere.
+# The host object of this node is found from its FC WWPNs or iSCSI name. A map is only removed
+# when nothing holds it open. Maps are listed before the mappings are read, so a volume mapped
+# in between is never taken for an orphan.
+sub orphan_maps {
+    my ($scfg, $storeid) = @_;
+    my %local;
+    for my $b (glob('/sys/block/dm-*')) {
+        my ($dm) = $b =~ m|/(dm-\d+)$| or next;
+        my $uuid = sysfs_read("$b/dm/uuid") // next;
+        my ($uid) = $uuid =~ m/^mpath-3([0-9a-f]{32})$/ or next;
+        $local{$uid} = $dm;
+    }
+    return [] if !%local;
+
+    my $host = local_host_name($scfg, $storeid);
+    my $maps = sw_list($scfg, $storeid, 'lshostvdiskmap', [], $host);
+    my %mapped = map { lc($_->{vdisk_UID} // '') => 1 } @$maps;
+    # only maps of this array: same system part of the UID as a volume it maps here
+    my %sys = map { substr($_, 0, 16) => 1 } grep { length($_) == 32 } keys %mapped;
+    return [] if !%sys;
+
+    my @out;
+    for my $uid (sort keys %local) {
+        next if $mapped{$uid} || !$sys{ substr($uid, 0, 16) };
+        my $dm = $local{$uid};
+        my $name = sysfs_read("/sys/block/$dm/dm/name") // next;
+        my @parts = grep { (sysfs_read("$_/dm/uuid") // '') =~ m/^part\d+-mpath-/ }
+            glob("/sys/block/$dm/holders/dm-*");
+        my @other = grep { (sysfs_read("$_/dm/uuid") // '') !~ m/^part\d+-mpath-/ }
+            glob("/sys/block/$dm/holders/*");
+        my $busy = @other || grep { (dm_open_count(sysfs_read("$_/dm/name") // '') // 1) != 0 } @parts;
+        my $open = dm_open_count($name) // 1;
+        push @out, { uid => $uid, dm => $dm, name => $name,
+            busy => ($busy || $open > scalar(@parts)) ? 1 : 0 };
+    }
+    return \@out;
+}
+
+sub orphan_sweep {
+    my ($scfg, $storeid, %param) = @_;
+    return [] if is_nvme($scfg);
+    my $list = orphan_maps($scfg, $storeid);
+    for my $o (@$list) {
+        if ($o->{busy}) {
+            warn "storwize: $o->{name} ($o->{dm}) is no longer mapped to this node but is in use - left alone\n";
+            next;
+        }
+        next if $param{dry_run};
+        eval { device_remove_local($o->{uid}) };
+        if ($@) {
+            warn "storwize: could not remove orphan map $o->{name}: $@";
+        } else {
+            $o->{removed} = 1;
+            warn "storwize: removed orphan multipath map $o->{name} ($o->{dm})\n";
+        }
+    }
+    return $list;
+}
+
+# Host object of this node on the array (cached: it only changes when the node is re-zoned).
+sub local_host_name {
+    my ($scfg, $storeid) = @_;
+    my $cf = run_dir($storeid) . "/local-host";
+    if (-f $cf && time() - ((stat($cf))[9] // 0) < 86400) {
+        my ($h) = (file_read_firstline($cf) // '') =~ m/^([A-Za-z0-9_.-]+)$/;
+        return $h if $h;
+    }
+    my @cand;
+    if (my $hc = $scfg->{'sw-hostcluster'}) {
+        @cand = map { $_->{name} } @{ sw_list($scfg, $storeid, 'lshost', [filtervalue => "host_cluster_name=$hc"]) };
+    } else {
+        @cand = grep { length } split(/\s*,\s*/, $scfg->{'sw-hosts'} // '');
+    }
+    my %wwpn;
+    for my $h (glob('/sys/class/fc_host/host*')) {
+        my $w = sysfs_read("$h/port_name") // next;
+        $w =~ s/^0x//;
+        $wwpn{ uc $w } = 1;
+    }
+    my $iqn = '';
+    if (open(my $fh, '<', '/etc/iscsi/initiatorname.iscsi')) {
+        while (<$fh>) { $iqn = $1 if m/^InitiatorName=(\S+)/ }
+        close($fh);
+    }
+    for my $h (@cand) {
+        my $hit = 0;
+        if (%wwpn) {
+            my $logins = eval { sw_list($scfg, $storeid, 'lsfabric', [host => $h]) } // [];
+            $hit = grep { $wwpn{ uc($_->{remote_wwpn} // '') } } @$logins;
+        }
+        if (!$hit && $iqn) {
+            my $d = eval { sw_show($scfg, $storeid, 'lshost', [], $h) } // {};
+            $hit = ($d->{iscsi_name} // '') =~ m/(?:^|,)\Q$iqn\E(?:,|$)/;
+        }
+        next if !$hit;
+        my ($name) = $h =~ m/^([A-Za-z0-9_.-]+)$/ or next;
+        file_set_contents($cf, "$name\n", 0600);
+        return $name;
+    }
+    die "storwize: this node is not one of the hosts of storage $storeid on the array\n";
 }
 
 # ---------------------------------------------------------------------------
@@ -1096,7 +1304,7 @@ sub snapro_activate {
 sub snapro_remove {
     my ($scfg, $storeid, $vg, $vol) = @_;
     if ($vol) {
-        eval { device_remove_local($vol->{vdisk_UID}) } if $vol->{vdisk_UID};
+        eval { device_remove($vol->{vdisk_UID}) } if $vol->{vdisk_UID};
         unmap_vdisk($scfg, $storeid, $vol->{name});
         sw_run($scfg, $storeid, 'rmvdisk', [], $vol->{name});
     }
@@ -1122,7 +1330,7 @@ sub snapro_purge {
             # a group made for the backup or the file restore can hold several volumes
             my $vols = sw_list($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g->{name}"]);
             for my $v (@$vols[1 .. $#$vols]) {
-                eval { device_remove_local($v->{vdisk_UID}) } if $v->{vdisk_UID};
+                eval { device_remove($v->{vdisk_UID}) } if $v->{vdisk_UID};
                 unmap_vdisk($scfg, $storeid, $v->{name});
                 sw_run($scfg, $storeid, 'rmvdisk', [], $v->{name});
             }
@@ -1425,6 +1633,12 @@ sub status {
         eval { snapro_purge($scfg, $storeid) } if snapmode($scfg) eq 'volumegroup';
         warn "storwize: snapshot access: $@" if $@;
     }
+    my $ostamp = run_dir($storeid) . "/orphan-sweep";
+    if (time() - ((stat($ostamp))[9] // 0) >= $ORPHAN_SWEEP_EVERY) {
+        file_set_contents($ostamp, time() . "\n", 0600);
+        eval { orphan_sweep($scfg, $storeid) };
+        warn "storwize: orphan multipath maps: $@" if $@;
+    }
     return ($c->{total}, $c->{free}, $c->{used}, 1);
 }
 
@@ -1580,7 +1794,7 @@ sub free_image {
     if (is_nvme($scfg)) {
         unlink nvme_wwid_file($storeid, $volname);       # the namespace goes away with the mapping
     } else {
-        device_remove_local($info->{vdisk_UID});
+        device_remove($info->{vdisk_UID});
     }
     unmap_vdisk($scfg, $storeid, $vname);
     # QoS (mkthrottle, 7.7+) attached to the volume goes with it

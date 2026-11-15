@@ -81,7 +81,7 @@ if ($cmd eq 'prepare') {
     my ($v, $snap) = @a;
     my $tgt = $P->can('snap_vdisk_name')->($scfg, $v, $snap);
     my $info = $P->can('vdisk_info')->($scfg, $storeid, $tgt) or exit 0;
-    $P->can('device_remove_local')->($info->{vdisk_UID});
+    $P->can('device_remove')->($info->{vdisk_UID});
     for my $m (@{ $P->can('sw_list')->($scfg, $storeid, 'lsvdiskhostmap', [], $tgt) }) {
         $run->('rmvdiskhostmap', [host => $m->{host_name}], $tgt);
     }
@@ -140,7 +140,7 @@ if ($cmd eq 'prepare') {
     my $ro = ro_group($vmid, $snap);
     if ($P->can('sw_show_opt')->($scfg, $storeid, 'lsvolumegroup', [], $ro)) {
         for my $r (@{ $P->can('sw_list')->($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$ro"]) }) {
-            eval { $P->can('device_remove_local')->($r->{vdisk_UID}) } if $r->{vdisk_UID};
+            eval { $P->can('device_remove')->($r->{vdisk_UID}) } if $r->{vdisk_UID};
             $run->('rmvdisk', [removehostmappings => undef], $r->{name});
         }
         $run->('rmvolumegroup', [], $ro);
@@ -207,7 +207,7 @@ sub fs_clean {
     my ($g) = @_;
     return if !$P->can('sw_show_opt')->($scfg, $storeid, 'lsvolumegroup', [], $g);
     for my $r (@{ $P->can('sw_list')->($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g"]) }) {
-        eval { $P->can('device_remove_local')->($r->{vdisk_UID}) } if $r->{vdisk_UID};
+        eval { $P->can('device_remove')->($r->{vdisk_UID}) } if $r->{vdisk_UID};
         $run->('rmvdisk', [removehostmappings => undef], $r->{name});
     }
     $run->('rmvolumegroup', [], $g);
