@@ -74,3 +74,6 @@ the tests marked with (auto).
 | T67 | file restore: large download through the panel | 1 GiB and 3 GiB streamed over the panel SSH channel | complete and identical (sha256); no stop at 512 MiB | Passed |
 | T68 | file restore: download in progress when the window closes | stop during a 285 MiB zip download | download completes; session and thinclone removed 5 s after | Passed |
 | T69 | file restore: Windows NTFS and XFS guests | Restore files on a Windows VM and an XFS VM snapshot | trees listed, file downloaded | Pending: no such VMs in the lab |
+| T70 | delete a disk mapped on two nodes | disk with a partition table (kpartx maps) active on both nodes; delete from one | map, partition maps and SCSI disks gone on both nodes; no failed paths | Passed |
+| T71 | delete a disk open on the other node | hold the device open on node 2, delete from node 1 | delete stops before the unmap with "still in use on node(s)"; works once released | Passed |
+| T72 | orphan cleanup | maps left by 0.4.0 deletes (15 + 9, some with partition maps) | listed by `stale-paths`, removed by the sweep; none in use touched; 0 failed paths after | Passed |

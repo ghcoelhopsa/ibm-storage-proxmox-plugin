@@ -281,7 +281,7 @@ pve-ibm-storage list                # registered storages, state, firmware, capa
 pve-ibm-storage info v7k            # system, pool and supported features
 pve-ibm-storage inventory           # guest <-> volume (UID, size, snapshots, local device)
 pve-ibm-storage orphans             # volumes with the prefix that no guest uses
-pve-ibm-storage stale-paths         # local multipath maps with no volume behind them
+pve-ibm-storage stale-paths         # local multipath maps of volumes no longer mapped here (--remove)
 pve-ibm-storage trash               # removed disks still kept on the array
 pve-ibm-storage --json inventory    # the same data as JSON
 ```
@@ -458,8 +458,6 @@ users with the least privilege (the panel needs `Sys.Audit` to read and `Sys.Mod
 - Taking a Safeguarded policy off a volume group, or deleting a Safeguarded snapshot before it
   expires, needs the array Security Administrator role.
 - Rollback needs the VM stopped, as always in Proxmox. The panel can start it again afterwards.
-- Removing a volume cleans up the local device only on the node that ran the command; on other
-  nodes use `scripts/cleanup-stale-paths.sh`.
 - Disks of one VM on different storages are not in the same consistency group.
 - Legacy arrays without UNMAP (such as the V7000 Gen1) do not reclaim space freed inside a VM.
 - Proxmox file restore cannot open LVM inside a backup when two disks of the VM carry the same

@@ -275,23 +275,27 @@ if ($cmd eq 'list') {
     print $json ? JSON->new->encode({ deleted => \@done }) . "\n" : join("", map { "$_ deleted\n" } @done);
 
 } elsif ($cmd eq 'stale-paths') {
+    # Maps of volumes the array no longer maps to this node (deleted, or moved to the trash,
+    # while this node was offline). --remove takes away the ones nothing holds open.
+    my $remove = grep { $_ eq '--remove' } @ARGV;
     my %known;
+    my @rows;
     for my $id (pick_stores()) {
         my $s = $stores{$id};
+        next if $P->can('is_nvme')->($s);
         my $all = eval { $P->can('sw_list')->($s, $id, 'lsvdisk', []) };
         if (!$all) { die "$id unreachable - cannot decide safely: $@"; }
         $known{ lc($_->{vdisk_UID}) } = "$id:$_->{name}" for @$all;
-    }
-    my @rows;
-    for my $dm (glob('/sys/block/dm-*')) {
-        my $uuid = PVE::Tools::file_read_firstline("$dm/dm/uuid") // next;
-        next if $uuid !~ m/^mpath-3(6005076[0-9a-f]{25})$/i;
-        my $uid = lc($1);
-        my @slaves = map { (split(m|/|))[-1] } glob("$dm/slaves/*");
-        push @rows, {
-            map => "3$uid", dm => (split(m|/|, $dm))[-1], paths => join(',', @slaves),
-            volume => $known{$uid} // '', state => $known{$uid} ? 'ok' : 'STALE',
-        };
+        my $list = eval { $P->can('orphan_sweep')->($s, $id, dry_run => !$remove) };
+        if (!$list) { warn "$id: $@"; next; }
+        for my $o (@$list) {
+            push @rows, {
+                map => $o->{name}, dm => $o->{dm},
+                paths => join(',', map { (split(m|/|))[-1] } glob("/sys/block/$o->{dm}/slaves/*")),
+                volume => $known{ $o->{uid} } // '',
+                state => $o->{removed} ? 'removed' : $o->{busy} ? 'STALE (in use)' : 'STALE',
+            };
+        }
     }
     out(\@rows, [qw(map dm paths volume state)]);
 
@@ -302,7 +306,7 @@ usage: pve-ibm-storage [--json] <command>
   info <storeid>       system, pool and features supported by the firmware
   inventory [storeid]  VM/CT <-> volume on the array
   orphans [storeid]    volumes with the prefix that no VM/CT owns
-  stale-paths          local IBM multipath maps with no volume on any array
+  stale-paths [--remove]  multipath maps of volumes the array no longer maps to this node
   trash [storeid]      removed disks kept on the array (sw-trash-days, default 7)
   trash-restore <storeid> <volume> [vmid]   put a disk back as an unused disk of the VM/CT
   trash-delete <storeid> <volume>           delete a disk from the trash now

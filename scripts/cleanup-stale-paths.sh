@@ -1,36 +1,20 @@
 #!/bin/bash
-# Removes from this node the multipath maps / SCSI devices of IBM volumes that no
-# longer exist on any registered array (e.g. a volume deleted from ANOTHER node -
-# free_image only cleans the node it ran on). Asks for confirmation for each map.
+# Removes from this node the multipath maps of IBM volumes that the array no longer maps to it
+# (deleted or moved to the trash while this node was offline, or by a plugin older than 0.4.1).
+# The plugin does the same by itself every 10 minutes; this is for doing it now.
 #   ./scripts/cleanup-stale-paths.sh [--yes]
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
-YES="${1:-}"
-mapfile -t STALE < <(pve-ibm-storage --json stale-paths | perl -MJSON -0e \
-    'for (@{decode_json(<STDIN>)}) { print "$_->{map} $_->{paths}\n" if $_->{state} eq "STALE" }')
-
-if [ ${#STALE[@]} -eq 0 ]; then
-    echo "no stale maps."
-else
-    for line in "${STALE[@]}"; do
-        read -r map paths <<<"$line"
-        echo "stale map: $map (paths: ${paths:-none})"
-        if [ "$YES" != "--yes" ]; then
-            read -r -p "  remove? [y/N] " a; [ "$a" = "y" ] || continue
-        fi
-        multipath -f "$map" || { echo "  could not remove $map (in use?)"; continue; }
-        for sd in ${paths//,/ }; do
-            [ -e "/sys/block/$sd/device/delete" ] && echo 1 > "/sys/block/$sd/device/delete"
-        done
-        multipath -w "$map" >/dev/null 2>&1 || true
-        echo "  removed."
-    done
+pve-ibm-storage stale-paths
+n=$(pve-ibm-storage --json stale-paths | perl -MJSON -0e \
+    'print scalar(grep { $_->{state} eq "STALE" } @{decode_json(<STDIN>)})')
+if [ "$n" -eq 0 ]; then
+    echo "nothing to remove."
+    exit 0
 fi
-
-# SCSI LUNs with no map at all (dead paths) - optional, with rescan-scsi-bus from sg3-utils
-if command -v rescan-scsi-bus.sh >/dev/null; then
-    echo
-    echo "To remove orphan SCSI LUNs (not mapped on the storage) run, with care:"
-    echo "  rescan-scsi-bus.sh -r      # -r removes devices that are gone from the storage"
+if [ "${1:-}" != "--yes" ]; then
+    read -r -p "remove the $n map(s) marked STALE? [y/N] " a
+    [ "$a" = "y" ] || exit 0
 fi
+pve-ibm-storage stale-paths --remove
