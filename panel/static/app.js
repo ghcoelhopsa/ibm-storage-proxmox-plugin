@@ -1907,15 +1907,17 @@ async function pageBackups(tab = "andamento") {
   const badNodes = Object.entries(B.nodes).filter(([, n]) => n.error || !n.installed);
   const head = pageHeader({ crumbs: [["Backups"]], title: `${icon("ibm-cloud--vpc-block-storage-snapshots", 24)} Backups`,
     sub: "Backup from storage snapshot (FlashCopy + changed blocks) to Proxmox Backup Server, plus the regular Proxmox backups in progress.",
-    actions: ME.admin ? btn("New schedule", "primary", 'id="bk-new"', "add") : "" });
+    actions: ME.admin ? btn("Settings", "tertiary", 'id="bk-set"', "settings") + " " + btn("New schedule", "primary", 'id="bk-new"', "add") : "" });
   const progCell = r => {
     if (r.kind !== "snapshot") return `<span class="muted">see the task in Proxmox</span>`;
     const p = r.progress; if (!p) return `<span class="muted">no detail (old tool on the node)</span>`;
+    if (p.phase === "queued") return `${tag("queued", "neutral")} <span class="helper">${esc(tr("waiting for a free slot"))} (${esc(tr("limit"))} ${esc(p.limit)} ${esc(tr("per node"))})</span>`;
     const pc = p.total ? Math.min(100, Math.round(100 * p.done / p.total)) : null;
     return `<span>${esc(p.phase)}</span>${pc != null && p.phase === "reading and sending" ? ` · <b>${pc}%</b> <span class="helper">${bytes(p.done)} / ${bytes(p.total)}</span>` : ""} ${tag(p.mode === "incremental" ? "incremental" : "full", "neutral")}`;
   };
   main.innerHTML = `<div class="page">${head}
     ${badNodes.length ? notification("warn", "Snapshot backup unavailable on some nodes", badNodes.map(([n, x]) => `${esc(n)}: ${esc(x.error || "tool not installed (use Prepare node)")}`).join(" · ")) : ""}
+    <p class="helper" style="margin:-.5rem 0 1rem">${esc(tr("Simultaneous snapshot backups per node"))}: <b>${esc(B.settings.max_parallel)}</b>${Object.values(B.settings.per_node).some(v => v !== B.settings.max_parallel) ? ` <span class="muted">(${Object.entries(B.settings.per_node).map(([n, v]) => `${esc(n)}: ${v}`).join(", ")})</span>` : ""}</p>
     ${tabs([["andamento", "In progress", B.running.length], ["snapshots", "Mounted snapshots", B.snapshots.length], ["agendamentos", "Schedules", B.schedules.length], ["execucoes", "Latest runs"]], tab, "data-bt")}
     <div id="bk-tab"></div></div>`;
   $$("[data-bt]").forEach(b => b.onclick = () => location.hash = `#/backups/${b.dataset.bt}`);
@@ -1940,6 +1942,7 @@ async function pageBackups(tab = "andamento") {
     { t: "Name", key: "name", render: c => `<b>${esc(c.name)}</b>` },
     { t: "VMs", render: c => c.vmids.map(v => `${v}${inPve(v) ? ` ${tag("also in Proxmox", "warn", "This VM is also in a Proxmox backup job: it will be backed up twice")}` : ""}`).join(", ") },
     { t: "PBS", key: "pbs" }, { t: "When", render: c => esc(schedWhen(c)) },
+    { t: "At a time", num: 1, render: c => esc(c.parallel || 1) },
     { t: "Next", sortVal: c => c.next || 0, render: c => !c.enabled ? tag("paused", "neutral") : c.next ? esc(dt(c.next)) : `<span class="muted">–</span>` },
     { t: "Last", render: c => c.running ? status("info", "running") : c.last ? `${status(c.last.results.every(x => x.ok) ? "ok" : "err", dt(c.last.finished))}` : `<span class="muted">never</span>` },
     { act: 1, render: c => ME.admin ? ovfButton(`data-bks="${esc(c.id)}"`, `Actions for ${c.name}`) : "" } ] }));
@@ -1950,6 +1953,7 @@ async function pageBackups(tab = "andamento") {
     { t: "Duration", num: 1, render: r => r.result && r.result.t && r.result.t.total != null ? esc(dur(r.result.t.total)) : "–" },
     { t: "Read", num: 1, render: r => r.result && r.result.read_MiB != null ? esc(bytes(r.result.read_MiB * 1048576)) : "–" },
     { t: "Sent", num: 1, render: r => r.result && r.result.sent_MiB != null ? esc(bytes(r.result.sent_MiB * 1048576)) : "–" } ] }));
+  $("#bk-set")?.addEventListener("click", () => backupSettingsFlow(B, reload));
   $("#bk-new")?.addEventListener("click", () => schedFlow(B, null, () => { if (tab === "agendamentos") reload(); else location.hash = "#/backups/agendamentos"; }));
   main.querySelector(".page").addEventListener("click", async e => {
     const c = e.target.closest("[data-bkc]"), m = e.target.closest("[data-bks]");
@@ -1969,6 +1973,21 @@ async function pageBackups(tab = "andamento") {
   });
   if (B.running.length && (tab === "andamento" || tab === "snapshots")) BK_TIMER = setTimeout(() => { if (location.hash.startsWith("#/backups") && !$("#modal-root").innerHTML && !$("#menu-root").innerHTML) reload(); }, 8000);
 }
+async function backupSettingsFlow(B, done) {
+  await modal({ title: "Backup settings", size: "sm",
+    body: `<div class="form-stack">${textInput("bs-n", "Simultaneous snapshot backups per node", `type="number" min="1" max="${B.settings.max}" value="${esc(B.settings.max_parallel)}"`,
+      esc(tr("Manual and scheduled backups count alike. Over the limit, a backup waits in the queue and starts when another one ends.")))}
+      ${notification("info", "How to size it", esc(tr("Each backup reads from the array and sends to the PBS at the same time. On a 1 GbE network 1 or 2 is usually right; with 10 GbE and a fast PBS, 4 or more. The bandwidth limit of Proxmox applies to each backup.")), true)}</div>`,
+    buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Save", kind: "primary" }],
+    onButton: async (id, root) => {
+      if (id !== "go") return false;
+      try {
+        const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/settings", { max_parallel: +$("#bs-n").value }));
+        const bad = r.nodes.filter(n => !n.ok); toast(bad.length ? "warn" : "ok", "Settings saved", bad.length ? bad.map(n => `${n.node}: ${n.error}`).join(" · ") : "");
+        done(); return false;
+      } catch (e) { toast("err", "Could not save", e.message); return true; }
+    } });
+}
 async function schedFlow(B, s, done) {
   const pbs = await api("GET", "/pbs-storages");
   const sel = new Set(s ? s.vmids : []), days = new Set(s ? s.days : []);
@@ -1979,7 +1998,9 @@ async function schedFlow(B, s, done) {
         <div class="inline-checks">${Object.keys(DAY_LABEL).map(d => checkbox("sc-d-" + d, DAY_LABEL[d], days.has(d), `data-day="${d}"`)).join("")}</div></div></div>
       <div class="cds--form-item"><span class="cds--label">VMs</span><div style="max-height:14rem;overflow:auto;border:1px solid var(--cds-border-subtle-01);padding:.5rem .75rem;width:100%">
         ${B.vms.map(v => checkbox("sc-v-" + v.vmid, `<b>${v.vmid}</b> <span data-noi18n>${esc(v.name || "")}</span> <span class="helper" data-noi18n>${esc(v.node || "")}</span>`, sel.has(v.vmid), `data-vm="${v.vmid}"`)).join("") || `<span class="muted">No VMs.</span>`}</div>
-        <div class="cds--form__helper-text">VMs run one at a time. Only VMs with disks on plugin storage use the snapshot; the others fall back to the regular backup.</div></div>
+        <div class="cds--form__helper-text">Only VMs with disks on plugin storage use the snapshot; the others fall back to the regular backup.</div></div>
+      ${textInput("sc-par", "VMs at a time", `type="number" min="1" max="${B.settings.max}" value="${esc(s ? s.parallel || 1 : 1)}"`,
+        `${esc(tr("Never more than the limit of simultaneous backups per node"))} (${esc(B.settings.max_parallel)}).`)}
       ${checkbox("sc-f", "If the snapshot backup fails, run the regular Proxmox backup", s ? s.fallback : true)}
       ${checkbox("sc-pr", "Mark the backup as <b>protected</b> on the PBS", s ? !!s.protected : false)}
       <p class="helper">Prune jobs and a plain remove skip protected backups; they stay until someone clears the mark in Proxmox, so they keep using space. The mark guards against mistakes, not against someone with rights on the datastore.</p></div>`,
@@ -1987,7 +2008,7 @@ async function schedFlow(B, s, done) {
     onButton: async (id, root) => {
       if (id !== "go") return false;
       const body = { id: s ? s.id : undefined, name: $("#sc-n").value.trim(), pbs: $("#sc-p").value, time: $("#sc-t").value, enabled: s ? s.enabled : true,
-        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), fallback: $("#sc-f").checked, protected: $("#sc-pr").checked };
+        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), fallback: $("#sc-f").checked, protected: $("#sc-pr").checked, parallel: +$("#sc-par").value };
       try { const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/schedules", body));
         const bad = r.nodes.filter(n => !n.ok); toast(bad.length ? "warn" : "ok", "Schedule saved", bad.length ? bad.map(n => `${n.node}: ${n.error}`).join(" · ") : ""); done(); return false; }
       catch (e) { toast("err", "Could not save", e.message); return true; }

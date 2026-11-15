@@ -33,7 +33,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -2610,7 +2610,11 @@ def backup_overview(s):
                 pve_jobs.append({"id": j.get("id"), "all": bool(to_int(j.get("all"))), "vmids": [to_int(x) for x in str(j.get("vmid") or "").split(",") if x]})
     except HTTPException:
         pass
+    limits = {n: to_int((d.get("settings") or {}).get("max_parallel")) or backup.DEFAULT_PARALLEL
+              for n, d in nodes.items() if not d.get("error")}
     return {"running": sorted(running, key=lambda r: r.get("start") or 0), "snapshots": sorted(snaps.values(), key=lambda x: -x["created"]),
+            "settings": {"max_parallel": max(limits.values()) if limits else backup.DEFAULT_PARALLEL, "per_node": limits,
+                         "max": backup.MAX_PARALLEL},
             "schedules": sorted(scheds.values(), key=lambda c: c["name"].lower()),
             "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs,
             "nodes": {n: {"error": d.get("error"), "installed": d.get("installed")} for n, d in nodes.items()},
@@ -2663,6 +2667,21 @@ async def backup_schedule_save(request: Request, s=Depends(admin)):
         nodessh.put(ip, f"/etc/systemd/system/{u}.timer", tim)
         node_sh(ip, backup.install_cmd(c))
     return {"schedule": c, "nodes": on_nodes(s, "could not save the schedule", apply)}
+
+
+@app.post("/api/backup/settings")
+async def backup_settings_save(request: Request, s=Depends(admin)):
+    """Simultaneous snapshot backups per node, written to every node. Jobs waiting for a slot pick
+    up a new limit at once."""
+    try:
+        c = backup.validate_settings(await request.json())
+    except ValueError as e:
+        err(400, str(e))
+
+    def apply(ip):
+        node_sh(ip, "mkdir -p /etc/ibm-storage-cbt && chmod 700 /etc/ibm-storage-cbt")
+        nodessh.put(ip, backup.SETTINGS, json.dumps(c), 0o600)
+    return {"settings": c, "nodes": on_nodes(s, "could not save the backup settings", apply)}
 
 
 @app.delete("/api/backup/schedules/{sid}")

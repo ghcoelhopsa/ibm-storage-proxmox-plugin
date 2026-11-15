@@ -61,3 +61,6 @@ the tests marked with (auto).
 | T54 | panel CSRF and sign-in limits | POST /api/logout without the header; 22 wrong passwords | 403; 429 from the 9th attempt | Passed |
 | T55 | build with pinned assets | build with the right sha512 and with a changed one | same assets as before; changed hash stops the build | Passed |
 | T56 | update progress without a session | update a 0.3.6 container to 0.3.7 and poll /api/info without signing in | new version and update state visible during the restart | Passed |
+| T57 | simultaneous backup limit | limit 1, three manual backups at once | one at a time, the others queued; queue time in the report | Passed |
+| T58 | schedule with VMs at a time | limit 2, schedule of 3 VMs with 3 at a time | two run together, the third waits; all incremental | Passed |
+| T59 | backup settings from the panel | Backups › Settings | written to every node (0600); out-of-range values refused | Passed |

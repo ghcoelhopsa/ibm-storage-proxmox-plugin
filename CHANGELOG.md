@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.8-beta - 2026-11-14
+- Simultaneous backups: limit of snapshot backups running at the same time on each node
+  (Backups › Settings, default 2, from 1 to 16). Manual and scheduled backups count alike; over the
+  limit a backup waits in the queue and starts when another one ends. A new limit applies at once,
+  also to backups already waiting.
+- Schedules run several VMs at a time (**VMs at a time**, default 1), never more than the node limit.
+- Queued backups show on Backups › In progress, with the limit; each report records how long the
+  backup waited.
+
 ## 0.3.7-beta - 2026-11-13
 - Panel update: the progress window no longer stays on "waiting for the installer". The panel
   restarts to install the update and the sessions do not survive it; the window now follows the

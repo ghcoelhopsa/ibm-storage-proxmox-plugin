@@ -57,7 +57,11 @@ for f in sorted(glob.glob("/etc/ibm-storage-cbt/schedules/*.json")):
     except Exception:
         c["last"] = None
     scheds.append(c)
-print(json.dumps({"units": units, "logs": logs, "progress": prog, "schedules": scheds,
+try:
+    settings = json.load(open("/etc/ibm-storage-cbt/settings.json"))
+except Exception:
+    settings = {}
+print(json.dumps({"units": units, "logs": logs, "progress": prog, "schedules": scheds, "settings": settings,
                   "mpaths": [os.path.basename(x)[len("dm-uuid-mpath-3"):] for x in glob.glob("/dev/disk/by-id/dm-uuid-mpath-3*")],
                   "installed": os.path.exists("/usr/local/lib/ibm-storage-cbt/cbt_job.py"), "now": int(time.time())}))
 PYEOF"""
@@ -86,8 +90,29 @@ def validate(b, pbs_ids):
     if not TIME_RE.match(str(b.get("time", ""))):
         raise ValueError("invalid time (HH:MM)")
     days = [d for d in DAYS if d in (b.get("days") or [])]
-    return {"id": sid, "name": name, "vmids": vmids, "pbs": b["pbs"], "time": b["time"], "days": days,
+    try:
+        parallel = 1 if b.get("parallel") in (None, "") else int(b.get("parallel"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid number of simultaneous VMs")
+    if not 1 <= parallel <= MAX_PARALLEL:
+        raise ValueError(f"simultaneous VMs: from 1 to {MAX_PARALLEL}")
+    return {"id": sid, "name": name, "vmids": vmids, "pbs": b["pbs"], "time": b["time"], "days": days, "parallel": parallel,
             "fallback": bool(b.get("fallback", True)), "protected": bool(b.get("protected", False)), "enabled": bool(b.get("enabled", True))}
+
+
+SETTINGS = "/etc/ibm-storage-cbt/settings.json"
+MAX_PARALLEL = 16
+DEFAULT_PARALLEL = 2
+
+
+def validate_settings(b):
+    try:
+        n = int(b.get("max_parallel"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid number of simultaneous backups")
+    if not 1 <= n <= MAX_PARALLEL:
+        raise ValueError(f"simultaneous backups per node: from 1 to {MAX_PARALLEL}")
+    return {"max_parallel": n}
 
 
 def on_calendar(c):
