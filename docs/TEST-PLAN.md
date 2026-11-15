@@ -64,3 +64,6 @@ the tests marked with (auto).
 | T57 | simultaneous backup limit | limit 1, three manual backups at once | one at a time, the others queued; queue time in the report | Passed |
 | T58 | schedule with VMs at a time | limit 2, schedule of 3 VMs with 3 at a time | two run together, the third waits; all incremental | Passed |
 | T59 | backup settings from the panel | Backups › Settings | written to every node (0600); out-of-range values refused | Passed |
+| T60 | bottleneck analysis | full backup of 140 GiB already in the PBS (servidor02, 10 GbE) and of 20 GiB with the PBS as a local VM | proxy 82 % (hashing; 80 MiB new) / source 71 %; network empty for the local PBS | Passed |
+| T61 | latency control: start | start limit below the array latency | backup queued with the reason; released when the limit goes back up | Passed |
+| T62 | latency control: slow down | slow-down limit below the measured latency during a full backup | readers 4 → 2, wait recorded in the report | Passed |

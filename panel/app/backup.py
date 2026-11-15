@@ -103,6 +103,7 @@ def validate(b, pbs_ids):
 SETTINGS = "/etc/ibm-storage-cbt/settings.json"
 MAX_PARALLEL = 16
 DEFAULT_PARALLEL = 2
+DEFAULT_LAT_START, DEFAULT_LAT_THROTTLE = 20, 30         # ms, array volume latency; 0 turns it off
 
 
 def validate_settings(b):
@@ -112,7 +113,16 @@ def validate_settings(b):
         raise ValueError("invalid number of simultaneous backups")
     if not 1 <= n <= MAX_PARALLEL:
         raise ValueError(f"simultaneous backups per node: from 1 to {MAX_PARALLEL}")
-    return {"max_parallel": n}
+    out = {"max_parallel": n}
+    for k, d in (("latency_start_ms", DEFAULT_LAT_START), ("latency_throttle_ms", DEFAULT_LAT_THROTTLE)):
+        try:
+            v = float(b.get(k, d))
+        except (TypeError, ValueError):
+            raise ValueError("invalid latency limit")
+        if not 0 <= v <= 1000:
+            raise ValueError("latency limits: from 0 (off) to 1000 ms")
+        out[k] = v
+    return out
 
 
 def on_calendar(c):

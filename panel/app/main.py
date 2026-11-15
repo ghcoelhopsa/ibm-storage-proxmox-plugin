@@ -33,7 +33,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -1805,7 +1805,7 @@ async def node_prepare(node: str, request: Request, s=Depends(admin)):
                 "for d in /usr/local/lib /var/lib /etc; do if [ -d $d/storwize-cbt ] && [ ! -e $d/ibm-storage-cbt ]; "
                 "then mv $d/storwize-cbt $d/ibm-storage-cbt; fi; done; "
                 f"mkdir -p {CBT_DIR} {CBT_LOG} /var/lib/ibm-storage-cbt && chmod 700 /var/lib/ibm-storage-cbt")
-            for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "sw-snap.pl"):
+            for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "sw-snap.pl"):
                 nodessh.put(ip, f"{CBT_DIR}/{f}", open(os.path.join(ASSETS, f)).read(), 0o755)
             nodessh.put(ip, f"{CBT_DIR}/VERSION", f"{VERSION}\n")
             run("snapshot backup: validation", f"python3 -c 'import nbd' && perl -c {CBT_DIR}/sw-snap.pl 2>&1 && "
@@ -2612,9 +2612,12 @@ def backup_overview(s):
         pass
     limits = {n: to_int((d.get("settings") or {}).get("max_parallel")) or backup.DEFAULT_PARALLEL
               for n, d in nodes.items() if not d.get("error")}
+    first = next((d.get("settings") or {} for d in nodes.values() if not d.get("error")), {})
     return {"running": sorted(running, key=lambda r: r.get("start") or 0), "snapshots": sorted(snaps.values(), key=lambda x: -x["created"]),
             "settings": {"max_parallel": max(limits.values()) if limits else backup.DEFAULT_PARALLEL, "per_node": limits,
-                         "max": backup.MAX_PARALLEL},
+                         "max": backup.MAX_PARALLEL,
+                         "latency_start_ms": first.get("latency_start_ms", backup.DEFAULT_LAT_START),
+                         "latency_throttle_ms": first.get("latency_throttle_ms", backup.DEFAULT_LAT_THROTTLE)},
             "schedules": sorted(scheds.values(), key=lambda c: c["name"].lower()),
             "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs,
             "nodes": {n: {"error": d.get("error"), "installed": d.get("installed")} for n, d in nodes.items()},

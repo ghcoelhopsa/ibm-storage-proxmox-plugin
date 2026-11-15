@@ -1911,9 +1911,11 @@ async function pageBackups(tab = "andamento") {
   const progCell = r => {
     if (r.kind !== "snapshot") return `<span class="muted">see the task in Proxmox</span>`;
     const p = r.progress; if (!p) return `<span class="muted">no detail (old tool on the node)</span>`;
-    if (p.phase === "queued") return `${tag("queued", "neutral")} <span class="helper">${esc(tr("waiting for a free slot"))} (${esc(tr("limit"))} ${esc(p.limit)} ${esc(tr("per node"))})</span>`;
+    if (p.phase === "queued") return p.why ? `${tag("queued", "warn")} <span class="helper">${esc(tr("storage latency"))}: ${esc(p.why)}</span>`
+      : `${tag("queued", "neutral")} <span class="helper">${esc(tr("waiting for a free slot"))} (${esc(tr("limit"))} ${esc(p.limit)} ${esc(tr("per node"))})</span>`;
+    const slow = p.readers_max && p.readers < p.readers_max ? ` ${tag(`${tr("slowed down")}: ${p.readers}/${p.readers_max}`, "warn", `${tr("array latency")} ${p.latency_ms ?? "?"} ms`)}` : "";
     const pc = p.total ? Math.min(100, Math.round(100 * p.done / p.total)) : null;
-    return `<span>${esc(p.phase)}</span>${pc != null && p.phase === "reading and sending" ? ` · <b>${pc}%</b> <span class="helper">${bytes(p.done)} / ${bytes(p.total)}</span>` : ""} ${tag(p.mode === "incremental" ? "incremental" : "full", "neutral")}`;
+    return `<span>${esc(p.phase)}</span>${pc != null && p.phase === "reading and sending" ? ` · <b>${pc}%</b> <span class="helper">${bytes(p.done)} / ${bytes(p.total)}</span>` : ""} ${tag(p.mode === "incremental" ? "incremental" : "full", "neutral")}${slow}`;
   };
   main.innerHTML = `<div class="page">${head}
     ${badNodes.length ? notification("warn", "Snapshot backup unavailable on some nodes", badNodes.map(([n, x]) => `${esc(n)}: ${esc(x.error || "tool not installed (use Prepare node)")}`).join(" · ")) : ""}
@@ -1952,7 +1954,8 @@ async function pageBackups(tab = "andamento") {
     { t: "Result", render: r => { const x = r.result; return x && !x.error ? status("ok", "done") : `${status("err", "failed")}<div class="helper">${esc((x && x.error) || r.log || "").slice(0, 200)}</div>`; } },
     { t: "Duration", num: 1, render: r => r.result && r.result.t && r.result.t.total != null ? esc(dur(r.result.t.total)) : "–" },
     { t: "Read", num: 1, render: r => r.result && r.result.read_MiB != null ? esc(bytes(r.result.read_MiB * 1048576)) : "–" },
-    { t: "Sent", num: 1, render: r => r.result && r.result.sent_MiB != null ? esc(bytes(r.result.sent_MiB * 1048576)) : "–" } ] }));
+    { t: "Sent", num: 1, render: r => r.result && r.result.sent_MiB != null ? esc(bytes(r.result.sent_MiB * 1048576)) : "–" },
+    { t: "Bottleneck", render: r => bottleneckCell(r.result && r.result.bottleneck) } ] }));
   $("#bk-set")?.addEventListener("click", () => backupSettingsFlow(B, reload));
   $("#bk-new")?.addEventListener("click", () => schedFlow(B, null, () => { if (tab === "agendamentos") reload(); else location.hash = "#/backups/agendamentos"; }));
   main.querySelector(".page").addEventListener("click", async e => {
@@ -1973,16 +1976,31 @@ async function pageBackups(tab = "andamento") {
   });
   if (B.running.length && (tab === "andamento" || tab === "snapshots")) BK_TIMER = setTimeout(() => { if (location.hash.startsWith("#/backups") && !$("#modal-root").innerHTML && !$("#menu-root").innerHTML) reload(); }, 8000);
 }
+// Bottleneck of one backup: the busiest stage, with the busy % of every stage on hover
+function bottleneckCell(b) {
+  if (!b || !b.bottleneck) return `<span class="muted">–</span>`;
+  const NAME = { source: "Source (array)", proxy: "Proxy (node CPU)", network: "Network", target: "Target (PBS)", bandwidth_limit: "Bandwidth limit", latency_control: "Latency control" };
+  const st = [["source", b.source], ["proxy", b.proxy], ["network", b.network], ["target", b.target]];
+  const tip = st.map(([k, v]) => `${tr(NAME[k])}: ${v == null ? (k === "network" && b.link && b.link.local_pbs ? tr("PBS on this node") : "–") : v + "%"}`).join(" · ")
+    + (b.throttled && (b.throttled.bandwidth_limit || b.throttled.latency_control) ? ` · ${tr("waiting")}: ${tr("bandwidth limit")} ${b.throttled.bandwidth_limit || 0}%, ${tr("latency control")} ${b.throttled.latency_control || 0}%` : "")
+    + (b.array_latency_peak_ms != null ? ` · ${tr("array latency peak")} ${b.array_latency_peak_ms} ms` : "");
+  const v = st.find(([k]) => k === b.bottleneck);
+  return `<span title="${esc(tip)}">${tag(tr(NAME[b.bottleneck] || b.bottleneck), "purple")}${v && v[1] != null ? ` <span class="helper">${v[1]}%</span>` : ""}</span>`;
+}
 async function backupSettingsFlow(B, done) {
   await modal({ title: "Backup settings", size: "sm",
     body: `<div class="form-stack">${textInput("bs-n", "Simultaneous snapshot backups per node", `type="number" min="1" max="${B.settings.max}" value="${esc(B.settings.max_parallel)}"`,
       esc(tr("Manual and scheduled backups count alike. Over the limit, a backup waits in the queue and starts when another one ends.")))}
+      <div><span class="cds--label" style="display:block;margin-bottom:.25rem">${esc(tr("Storage latency control"))}</span>
+      <div class="g g-2">${textInput("bs-ls", "Do not start backups above (ms)", `type="number" min="0" max="1000" step="0.5" value="${esc(B.settings.latency_start_ms)}"`)}
+        ${textInput("bs-lt", "Slow down running backups above (ms)", `type="number" min="0" max="1000" step="0.5" value="${esc(B.settings.latency_throttle_ms)}"`)}</div>
+      <p class="helper">${esc(tr("Volume latency of the array, measured every 15 s. Above the first limit new backups wait; above the second, running backups read with fewer threads until the latency drops. 0 turns it off."))}</p></div>
       ${notification("info", "How to size it", esc(tr("Each backup reads from the array and sends to the PBS at the same time. On a 1 GbE network 1 or 2 is usually right; with 10 GbE and a fast PBS, 4 or more. The bandwidth limit of Proxmox applies to each backup.")), true)}</div>`,
     buttons: [{ id: "no", label: "Cancel" }, { id: "go", label: "Save", kind: "primary" }],
     onButton: async (id, root) => {
       if (id !== "go") return false;
       try {
-        const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/settings", { max_parallel: +$("#bs-n").value }));
+        const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/settings", { max_parallel: +$("#bs-n").value, latency_start_ms: +$("#bs-ls").value, latency_throttle_ms: +$("#bs-lt").value }));
         const bad = r.nodes.filter(n => !n.ok); toast(bad.length ? "warn" : "ok", "Settings saved", bad.length ? bad.map(n => `${n.node}: ${n.error}`).join(" · ") : "");
         done(); return false;
       } catch (e) { toast("err", "Could not save", e.message); return true; }

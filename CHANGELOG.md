@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.9-beta - 2026-11-14
+- Storage latency control for the backup from the array snapshot (Backups › Settings). The array
+  volume latency is read every 15 s: above the start limit (default 20 ms) new backups wait in the
+  queue, with the reason shown; above the slow-down limit (default 30 ms) running backups read with
+  fewer threads until the latency is back under 70 % of the limit. 0 turns either off.
+- Bottleneck analysis in every backup report and on Backups › Latest runs: how busy each stage was
+  (source: reading the array; proxy: node CPU for hashing and compression; network: the link to
+  the PBS, measured on the bridge port toward it; target: the PBS, estimated) and which one held
+  the backup back. Time spent waiting on the bandwidth limit or on the latency control is shown
+  apart.
+- A running backup shows when it is slowed down by the latency control.
+
 ## 0.3.8-beta - 2026-11-14
 - Simultaneous backups: limit of snapshot backups running at the same time on each node
   (Backups › Settings, default 2, from 1 to 16). Manual and scheduled backups count alike; over the
