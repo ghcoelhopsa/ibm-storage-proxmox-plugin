@@ -372,3 +372,5 @@ textarea.cds--text-area.mono { width: 100%; font-size: .75rem; line-height: 1.3;
 .md-ul li { margin: .25rem 0; } .md table.mini { margin: .5rem 0; } .md code { font-family: var(--cds-code-01-font-family, monospace); font-size: .875em; }
 .up-bar { display: block; height: 100%; background: var(--cds-interactive, #0f62fe); animation: up-run 1.6s ease-in-out infinite alternate; }
 @keyframes up-run { from { margin-left: 0; } to { margin-left: 85%; } }
+
+.bn-line { margin-top: .25rem; white-space: nowrap; } .bn-line .bn-on { font-weight: 600; color: var(--cds-text-primary); }

@@ -29,9 +29,9 @@ DEFAULT_PARALLEL = 2
 MAX_PARALLEL = 16
 
 
-def _queued(pfile, vmid, since, limit, why):
+def _queued(pfile, vmid, since, limit, why, **extra):
     try:
-        json.dump({"vmid": int(vmid), "phase": "queued", "started": since, "limit": limit, "why": why, "total": 0, "done": 0},
+        json.dump({"vmid": int(vmid), "phase": "queued", "started": since, "limit": limit, "why": why, "total": 0, "done": 0, **extra},
                   open(pfile + ".tmp", "w"))
         os.replace(pfile + ".tmp", pfile)
     except OSError:
@@ -77,7 +77,8 @@ def take_slot(vmid):
                 last_check[:] = [time.time(), cbt_perf.array_latency(store)]
             lat = last_check[1]
             if lat is not None and lat > st["latency_start_ms"]:
-                _queued(pfile, vmid, since, n, f"array latency {lat:.1f} ms (limit {st['latency_start_ms']:g} ms)")
+                _queued(pfile, vmid, since, n, f"array latency {lat:.1f} ms (limit {st['latency_start_ms']:g} ms)",
+                        lat_ms=round(lat, 2), lat_limit=st["latency_start_ms"])
                 time.sleep(5)
                 continue
         for i in range(n):

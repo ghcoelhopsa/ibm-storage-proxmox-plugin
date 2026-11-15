@@ -11,6 +11,8 @@
   the backup back. Time spent waiting on the bandwidth limit or on the latency control is shown
   apart.
 - A running backup shows when it is slowed down by the latency control.
+- The Bottleneck column shows every stage on the row (not only on hover); the reason a backup waits
+  for the latency is translated in the panel.
 
 ## 0.3.8-beta - 2026-11-14
 - Simultaneous backups: limit of snapshot backups running at the same time on each node

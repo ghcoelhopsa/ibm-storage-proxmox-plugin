@@ -1911,9 +1911,9 @@ async function pageBackups(tab = "andamento") {
   const progCell = r => {
     if (r.kind !== "snapshot") return `<span class="muted">see the task in Proxmox</span>`;
     const p = r.progress; if (!p) return `<span class="muted">no detail (old tool on the node)</span>`;
-    if (p.phase === "queued") return p.why ? `${tag("queued", "warn")} <span class="helper">${esc(tr("storage latency"))}: ${esc(p.why)}</span>`
+    if (p.phase === "queued") return p.why ? `${tag("queued", "warn")} <span class="helper">${esc(tr("storage latency"))} ${p.lat_ms != null ? `${esc(num(p.lat_ms, 1))} ms (${esc(tr("limit"))} ${esc(p.lat_limit)} ms)` : esc(p.why)}</span>`
       : `${tag("queued", "neutral")} <span class="helper">${esc(tr("waiting for a free slot"))} (${esc(tr("limit"))} ${esc(p.limit)} ${esc(tr("per node"))})</span>`;
-    const slow = p.readers_max && p.readers < p.readers_max ? ` ${tag(`${tr("slowed down")}: ${p.readers}/${p.readers_max}`, "warn", `${tr("array latency")} ${p.latency_ms ?? "?"} ms`)}` : "";
+    const slow = p.readers_max && p.readers < p.readers_max ? ` ${tag(`${tr("slowed down")}: ${p.readers}/${p.readers_max} ${tr("threads")}`, "warn")} <span class="helper">${esc(tr("array latency"))} ${p.latency_ms != null ? esc(num(p.latency_ms, 1)) : "?"} ms</span>` : "";
     const pc = p.total ? Math.min(100, Math.round(100 * p.done / p.total)) : null;
     return `<span>${esc(p.phase)}</span>${pc != null && p.phase === "reading and sending" ? ` · <b>${pc}%</b> <span class="helper">${bytes(p.done)} / ${bytes(p.total)}</span>` : ""} ${tag(p.mode === "incremental" ? "incremental" : "full", "neutral")}${slow}`;
   };
@@ -1985,7 +1985,9 @@ function bottleneckCell(b) {
     + (b.throttled && (b.throttled.bandwidth_limit || b.throttled.latency_control) ? ` · ${tr("waiting")}: ${tr("bandwidth limit")} ${b.throttled.bandwidth_limit || 0}%, ${tr("latency control")} ${b.throttled.latency_control || 0}%` : "")
     + (b.array_latency_peak_ms != null ? ` · ${tr("array latency peak")} ${b.array_latency_peak_ms} ms` : "");
   const v = st.find(([k]) => k === b.bottleneck);
-  return `<span title="${esc(tip)}">${tag(tr(NAME[b.bottleneck] || b.bottleneck), "purple")}${v && v[1] != null ? ` <span class="helper">${v[1]}%</span>` : ""}</span>`;
+  const SHORT = { source: "Source", proxy: "Proxy", network: "Network", target: "PBS" };
+  const line = st.map(([k, val]) => `<span class="${k === b.bottleneck ? "bn-on" : ""}">${esc(tr(SHORT[k]))} ${val == null ? (k === "network" && b.link && b.link.local_pbs ? esc(tr("local")) : "–") : val + "%"}</span>`).join(" · ");
+  return `<span title="${esc(tip)}">${tag(tr(NAME[b.bottleneck] || b.bottleneck), "purple")}${v && v[1] != null ? ` <b>${v[1]}%</b>` : ""}<div class="helper bn-line">${line}</div></span>`;
 }
 async function backupSettingsFlow(B, done) {
   await modal({ title: "Backup settings", size: "sm",
