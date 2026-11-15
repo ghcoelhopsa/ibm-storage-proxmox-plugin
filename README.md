@@ -360,6 +360,12 @@ usual way. If the snapshot path fails, the job falls back to the regular Proxmox
 Schedules are created on the **Backups** page. Each schedule becomes a systemd timer on the nodes,
 so it runs even when the panel is down. Retention is whatever is configured in PBS.
 
+**Simultaneous backups.** Each node runs at most a set number of snapshot backups at the same
+time (**Backups › Settings**, default 2); manual and scheduled backups count alike, and the ones over
+the limit wait in a queue. A schedule can back up several of its VMs at a time (**VMs at a time**),
+always within the node limit. Size it by the network and the PBS: on 1 GbE, 1 or 2; with 10 GbE and
+a fast PBS, 4 or more. The Proxmox bandwidth limit applies to each backup.
+
 A VM should be in a snapshot schedule or in a Proxmox backup job, not both, unless you want two
 backups.
 
