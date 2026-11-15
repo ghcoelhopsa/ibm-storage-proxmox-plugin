@@ -243,6 +243,42 @@ class NodeSSH:
         finally:
             c.close()
 
+    def stream(self, ip, cmd, timeout=3600):
+        """Runs cmd and returns an iterator over its stdout. Raises NodeError (with stderr) when the
+        command fails before writing anything, so the HTTP response can still carry the error."""
+        c = self.connect(ip)
+        try:
+            t = c.get_transport()
+            # paramiko renegotiates the keys every 512 MiB and, while a large download is running,
+            # the renegotiation times out ("Key-exchange timed out"). The ciphers in use (chacha20,
+            # AES-GCM) are good for far more data than that; the node can still renegotiate.
+            t.packetizer.REKEY_BYTES = t.packetizer.REKEY_PACKETS = 1 << 62
+            ch = t.open_session()
+            ch.settimeout(timeout)
+            ch.exec_command(cmd)  # nosec B601 - fixed scripts; every value is quoted with sh()
+            first = ch.recv(1 << 16)
+            if not first:
+                rc = ch.recv_exit_status()
+                e = ch.makefile_stderr().read().decode(errors="replace").strip()
+                if rc != 0:
+                    raise NodeError(e[-400:] or f"rc={rc}")
+        except BaseException:
+            c.close()
+            raise
+
+        def gen():
+            try:
+                if first:
+                    yield first
+                    while True:
+                        b = ch.recv(1 << 20)
+                        if not b:
+                            break
+                        yield b
+            finally:
+                c.close()
+        return gen()
+
     def put(self, ip, path, content, mode=0o644):
         c = self.connect(ip)
         try:

@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import backup
@@ -33,7 +33,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.3.9"
+VERSION = "0.4.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -1805,11 +1805,13 @@ async def node_prepare(node: str, request: Request, s=Depends(admin)):
                 "for d in /usr/local/lib /var/lib /etc; do if [ -d $d/storwize-cbt ] && [ ! -e $d/ibm-storage-cbt ]; "
                 "then mv $d/storwize-cbt $d/ibm-storage-cbt; fi; done; "
                 f"mkdir -p {CBT_DIR} {CBT_LOG} /var/lib/ibm-storage-cbt && chmod 700 /var/lib/ibm-storage-cbt")
-            for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "sw-snap.pl"):
+            run("file restore: restore VM image", "export DEBIAN_FRONTEND=noninteractive; "
+                "dpkg -s proxmox-backup-restore-image >/dev/null 2>&1 || { (apt-get update -q || true) && apt-get install -y -q proxmox-backup-restore-image; }")
+            for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "file_restore.py", "sw-snap.pl"):
                 nodessh.put(ip, f"{CBT_DIR}/{f}", open(os.path.join(ASSETS, f)).read(), 0o755)
             nodessh.put(ip, f"{CBT_DIR}/VERSION", f"{VERSION}\n")
             run("snapshot backup: validation", f"python3 -c 'import nbd' && perl -c {CBT_DIR}/sw-snap.pl 2>&1 && "
-                f"python3 -m py_compile {CBT_DIR}/cbt_backup.py && echo ok")
+                f"python3 -m py_compile {CBT_DIR}/cbt_backup.py {CBT_DIR}/file_restore.py && echo ok")
         if b.get("plugin"):
             run("directory", "mkdir -p /usr/share/perl5/PVE/Storage/Custom")
             nodessh.put(ip, "/usr/share/perl5/PVE/Storage/Custom/StorwizePlugin.pm",
@@ -2731,6 +2733,114 @@ async def backup_snapshot_cleanup(request: Request, s=Depends(admin)):
     if bad:
         err(500, f"could not delete {bad[0]['volume']}: {bad[0]['out']}")
     return {"log": log}
+
+
+# ---- file restore from an array snapshot -----------------------------------------------
+# The node maps a thinclone of the snapshot and opens it in the Proxmox restore VM (see
+# cbt/file_restore.py). The panel only relays listings and downloads; nothing is mounted here.
+FILE_SESSIONS = {}
+FILE_FORMATS = {"plain": "", "zip": ".zip", "tar.zst": ".tar.zst"}
+B64_RE = re.compile(r"^[A-Za-z0-9+/]{1,4096}={0,2}$")
+
+
+def file_session(sid, s):
+    f = FILE_SESSIONS.get(sid)
+    if not f or not re.match(r"^[0-9a-f]{12}$", sid):
+        err(404, "the file restore session ended: open it again")
+    if f["user"] != s["pve"]["user"]:
+        err(403, "this file restore session belongs to another user")
+    return f
+
+
+def file_log(s, f, what):
+    print(f"file restore: {s['pve']['user']} {what} - VM {f['vmid']} snapshot {f['snap']} "
+          f"({f['storage']}) on {f['node']}", flush=True)
+
+
+@app.post("/api/vms/{vmid}/files")
+async def file_restore_start(vmid: int, request: Request, s=Depends(admin)):
+    """Opens a snapshot of the VM's volume group for browsing (thinclone + restore VM on a node)."""
+    b = await request.json()
+    storeid, snap = str(b.get("storage", "")), str(b.get("snap", ""))
+    scfg = storage_cfg(s, storeid)
+    if scfg.get("sw-snapmode", "flashcopy") != "volumegroup":
+        err(400, "file restore needs the volume group snapshot engine on this storage")
+    if scfg.get("sw-partition"):
+        err(400, "not available for storages inside a storage partition yet")
+    if not sv8.SNAPNAME_RE.match(snap):
+        err(400, "invalid snapshot name")
+    g = guest_status(s, vmid)
+    if g and g.get("type") != "qemu":
+        err(400, "file restore is for VMs")
+    nodes = dict(cluster_nodes(s))
+    node = g["node"] if g and g.get("node") in nodes else next(iter(nodes), None)
+    if not node:
+        err(502, "no node available")
+    ip = nodes[node]
+    cmd = (f"test -x {CBT_DIR}/file_restore.py || {{ echo 'file restore is not installed on node {node} - "
+           f"use Prepare node with the snapshot backup option' >&2; exit 3; }}; "
+           f"python3 {CBT_DIR}/file_restore.py start {sh(storeid)} {vmid} {sh(snap)}")
+    rc, o, e = await run_in_threadpool(nodessh.run, ip, cmd, 600)
+    if rc != 0:
+        err(502, (e or o).strip()[-400:] or f"rc={rc}")
+    try:
+        r = json.loads(o)
+    except ValueError:
+        err(502, f"unexpected answer from node {node}")
+    FILE_SESSIONS[r["id"]] = {"ip": ip, "node": node, "vmid": vmid, "storage": storeid, "snap": snap,
+                              "user": s["pve"]["user"], "created": time.time()}
+    file_log(s, FILE_SESSIONS[r["id"]], "opened")
+    return dict(r, node=node)
+
+
+@app.get("/api/files/{sid}/list")
+def file_restore_list(sid: str, path: str, s=Depends(admin)):
+    f = file_session(sid, s)
+    if not B64_RE.match(path):
+        err(400, "invalid path")
+    rc, o, e = nodessh.run(f["ip"], f"python3 {CBT_DIR}/file_restore.py list {sid} {sh(path)}", 120)
+    if rc != 0:
+        if "session ended" in e:
+            FILE_SESSIONS.pop(sid, None)
+            err(410, e.strip())
+        err(502, (e or o).strip()[-400:])
+    try:
+        rows = json.loads(o)
+    except ValueError:
+        err(502, "unexpected answer from the node")
+    return [{"path": x.get("filepath"), "name": x.get("text"), "type": x.get("type"), "size": x.get("size"),
+             "mtime": x.get("mtime"), "leaf": x.get("leaf")} for x in rows if isinstance(x, dict)]
+
+
+@app.get("/api/files/{sid}/download")
+def file_restore_download(sid: str, path: str, format: str = "plain", s=Depends(admin)):
+    f = file_session(sid, s)
+    if not B64_RE.match(path) or format not in FILE_FORMATS:
+        err(400, "invalid request")
+    try:
+        name = base64.b64decode(path).decode().rstrip("/").rsplit("/", 1)[-1] or "files"
+    except ValueError:
+        err(400, "invalid path")
+    name = re.sub(r'[\x00-\x1f"\\/]', "_", name)[:200] + FILE_FORMATS[format]
+    try:
+        it = nodessh.stream(f["ip"], f"python3 {CBT_DIR}/file_restore.py extract {sid} {sh(path)} {sh(format)}")
+    except NodeError as e:
+        err(502, str(e))
+    file_log(s, f, f"downloaded {base64.b64decode(path).decode(errors='replace')} ({format})")
+    from urllib.parse import quote
+    return StreamingResponse(it, media_type="application/octet-stream", headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}", "Cache-Control": "no-store"})
+
+
+@app.delete("/api/files/{sid}")
+def file_restore_stop(sid: str, s=Depends(admin)):
+    f = file_session(sid, s)
+    rc, o, e = nodessh.run(f["ip"], f"python3 {CBT_DIR}/file_restore.py stop {sid}", 600)
+    FILE_SESSIONS.pop(sid, None)
+    file_log(s, f, "closed")
+    if rc != 0:
+        err(502, (e or o).strip()[-400:])
+    return {"stopped": True}
 
 
 def restart_soon(delay=2.0):

@@ -1143,6 +1143,7 @@ async function pageVMs() {
       const base = `/storages/${encodeURIComponent(s.storage)}/vg/${encodeURIComponent(s.vg)}/snapshots/${encodeURIComponent(s.name)}`;
       openMenu(b, [
         { label: "New VM from this snapshot…", icon: "copy", run: () => vgNewVmFlow(`${base}/newvm`, { name: s.vg, vmid: v.vmid, vm_name: v.name, vm_node: v.node }, s.name) },
+        { label: "Restore files…", icon: "folder", run: () => fileRestoreFlow(v, s) },
         { label: "Restore over this VM…", icon: "undo", run: async () => {
           if (v.status !== "stopped") return toast("warn", "Shut down the VM first", "Restoring overwrites all its disks with the snapshot content.");
           if (await confirmDialog({ label: `VM ${v.vmid}`, title: `Restore “${s.name}”?`, danger: true, ok: "Restore",
@@ -1657,6 +1658,66 @@ async function protectionTab(el, id) {
       ].filter(Boolean));
     }
   });
+}
+// File restore from an array snapshot: the node opens a read-only thinclone of the snapshot in the
+// Proxmox restore VM; this window browses it and downloads files or folders (zip).
+async function fileRestoreFlow(v, snap) {
+  let sess = null, path = [], closed = false;
+  const b64 = p => btoa(String.fromCharCode(...new TextEncoder().encode(p)));
+  const isDir = r => r.type === "d" || r.type === "v";
+  const label = (parent, p) => parent === "part" ? `${tr("Partition")} ${p}` : p === "part" ? tr("Partitions") : p === "lvm" ? "LVM" : p === "zpool" ? "ZFS" : p === "raw" ? tr("Whole disk") : p;
+  const diskName = serial => { const d = sess.disks.find(x => x.serial === serial); return d ? `${d.key || d.serial} · ${d.volume}` : serial; };
+  const crumbs = () => [`<a href="#" data-cr="0">${esc(tr("Disks"))}</a>`,
+    ...path.map((p, i) => `<a href="#" data-cr="${i + 1}">${esc(i === 0 ? diskName(p) : label(path[i - 1], p))}</a>`)].join(` <span class="muted">/</span> `);
+  const dl = (p, fmt) => {
+    const a = document.createElement("a");
+    a.href = `/api/files/${sess.id}/download?path=${encodeURIComponent(b64(p))}&format=${fmt}`;
+    a.rel = "noopener"; document.body.appendChild(a); a.click(); a.remove();
+  };
+  const render = async (root, forward = true) => {
+    const box = $("#fr-list", root);
+    $("#fr-crumbs", root).innerHTML = crumbs();
+    $$("[data-cr]", root).forEach(a => a.onclick = e => { e.preventDefault(); path = path.slice(0, +a.dataset.cr); render(root, false); });
+    $("#fr-here", root).hidden = path.length < 3;
+    if (!path.length) {
+      box.innerHTML = `<table class="mini"><tbody>${sess.disks.map(d => `<tr><td><a href="#" data-dir="${esc(d.serial)}">${icon("volume--block-storage")} <b>${esc(d.key || d.serial)}</b></a> <span class="muted mono">${esc(d.volume)}</span></td></tr>`).join("")}</tbody></table>`;
+    } else {
+      box.innerHTML = `<div class="cds--skeleton sk-block" style="height:8rem"></div>`;
+      let rows;
+      try { rows = await api("GET", `/files/${sess.id}/list?path=${encodeURIComponent(b64("/" + path.join("/")))}`); }
+      catch (e) { box.innerHTML = `<div class="mini-empty">${esc(e.message)}</div>`; return; }
+      // a level with one virtual entry only ("part" of a disk): go straight into it
+      if (forward && rows.length === 1 && rows[0].type === "v") { path.push(rows[0].name); return render(root); }
+      rows.sort((a, b) => isDir(b) - isDir(a) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+      const inFs = path.length >= 3;
+      const parent = path[path.length - 1];
+      box.innerHTML = rows.length ? `<table class="mini"><thead><tr><th>${esc(tr("Name"))}</th><th class="num">${esc(tr("Size"))}</th><th>${esc(tr("Modified"))}</th><th></th></tr></thead><tbody>
+        ${rows.map((r, i) => `<tr><td>${isDir(r) ? `<a href="#" data-dir="${esc(r.name)}">${icon(r.type === "v" ? "volume--block-storage" : "folder")} ${esc(label(parent, r.name))}</a>` : `${icon("document")} ${esc(r.name)}${r.type === "l" ? " " + tag("link", "neutral") : ""}`}</td>
+          <td class="num">${r.size != null && r.type !== "v" ? esc(bytes(r.size)) : ""}</td><td>${r.mtime ? esc(dt(r.mtime)) : ""}</td>
+          <td class="act">${r.type === "f" ? btn("Download", "ghost", `data-get="${i}" data-fmt="plain"`, "download", "sm") : r.type === "d" && inFs ? btn("Download .zip", "ghost", `data-get="${i}" data-fmt="zip"`, "download", "sm") : ""}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="mini-empty">${esc(path.length <= 2 ? tr("No file system found on this disk (empty, encrypted, or a format the restore VM does not read).") : tr("Empty folder."))}</div>`;
+      $$("[data-get]", box).forEach(b => b.onclick = () => dl("/" + [...path, rows[+b.dataset.get].name].join("/"), b.dataset.fmt));
+    }
+    $$("[data-dir]", box).forEach(a => a.onclick = e => { e.preventDefault(); path.push(a.dataset.dir); render(root); });
+  };
+  const stop = () => { if (sess && !closed) { closed = true; api("DELETE", `/files/${sess.id}`).catch(() => { }); } };
+  await modal({
+    label: `VM ${v.vmid} · ${snap.storage}`, title: `${tr("Restore files")} · ${snap.name}`, size: "lg",
+    body: `<p class="helper">${esc(tr("The snapshot is opened read-only: the array gives a temporary copy of it (thinclone) to one node, where the Proxmox restore VM reads the file systems. Nothing is written to the snapshot or to the VM. The copy is removed when this window closes, or after 10 minutes without use."))}</p>
+      <div id="fr-crumbs" class="fr-crumbs"></div>
+      <div id="fr-list"><div class="mini-empty"><span class="busy-ico"></span>${esc(tr("Opening the snapshot… (about 10 s)"))}</div></div>
+      <div id="fr-here" hidden style="margin-top:.75rem">${btn("Download this folder (.zip)", "tertiary", 'data-here="zip"', "download", "sm")} ${btn("Download as .tar.zst", "ghost", 'data-here="tar.zst"', "download", "sm")}</div>`,
+    buttons: [{ id: "close", label: "Close", kind: "secondary" }],
+    onOpen: async root => {
+      $$("[data-here]", root).forEach(b => b.onclick = () => dl("/" + path.join("/"), b.dataset.here));
+      try { sess = await api("POST", `/vms/${v.vmid}/files`, { storage: snap.storage, snap: snap.name }); }
+      catch (e) { $("#fr-list", root).innerHTML = `<div class="mini-empty">${esc(tr("Could not open the snapshot"))}: ${esc(e.message)}</div>`; return; }
+      if (!$("#fr-list", root).isConnected) return stop();       // closed while it was opening
+      if (sess.disks.length === 1) path = [sess.disks[0].serial];
+      render(root);
+    },
+  });
+  stop();
 }
 async function vgNewVmFlow(url, g, snap) {
   const [nid, nodes] = await Promise.all([api("GET", "/nextid"), api("GET", "/nodes")]);

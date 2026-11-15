@@ -25,7 +25,7 @@ use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
 
-our $VERSION = '0.3.9';
+our $VERSION = '0.4.0';
 
 # Storage API this module was validated against (PVE 9.2, libpve-storage-perl 9.1).
 my $TESTED_APIVER = 14;
@@ -1119,7 +1119,13 @@ sub snapro_purge {
         my ($t) = ($g->{name} // '') =~ m/^\Q$p\E-snapro-\d+-(\d+)-[0-9a-f]{6}$/ or next;
         next if time() - $t < $SNAPRO_KEEP;
         eval {
+            # a group made for the backup or the file restore can hold several volumes
             my $vols = sw_list($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g->{name}"]);
+            for my $v (@$vols[1 .. $#$vols]) {
+                eval { device_remove_local($v->{vdisk_UID}) } if $v->{vdisk_UID};
+                unmap_vdisk($scfg, $storeid, $v->{name});
+                sw_run($scfg, $storeid, 'rmvdisk', [], $v->{name});
+            }
             snapro_remove($scfg, $storeid, $g->{name}, $vols->[0]);
         };
         warn "storwize: snapshot access '$g->{name}' kept: $@" if $@;

@@ -49,7 +49,7 @@ cp "$P/systemd/"* "$O/systemd/"
 cp -r "$P/static/." "$O/static/"
 cp -r "$VENDOR/." "$O/static/vendor/"
 cp "$REPO/src/PVE/Storage/Custom/StorwizePlugin.pm" "$REPO/src/PVE/Storage/Custom/FlashSystemPlugin.pm" "$REPO/bin/pve-ibm-storage" "$O/assets/"
-cp "$REPO/cbt/cbt_backup.py" "$REPO/cbt/cbt_job.py" "$REPO/cbt/cbt_sched.py" "$REPO/cbt/cbt_perf.py" "$REPO/cbt/sw-snap.pl" "$O/assets/"
+cp "$REPO/cbt/cbt_backup.py" "$REPO/cbt/cbt_job.py" "$REPO/cbt/cbt_sched.py" "$REPO/cbt/cbt_perf.py" "$REPO/cbt/file_restore.py" "$REPO/cbt/sw-snap.pl" "$O/assets/"
 cp "$REPO/CHANGELOG.md" "$O/"
 echo "$VERSION" > "$O/VERSION"
 # Debian packages the panel needs (the updater installs the missing ones)

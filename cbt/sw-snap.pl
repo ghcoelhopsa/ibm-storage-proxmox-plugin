@@ -14,6 +14,13 @@
 #   sw-snap.pl vgmap    <storeid> <vmid> <snap> <volname>...  thinclone of the snapshot, mapped to this
 #                                                             node only; prints "<volname> <device>"
 #   sw-snap.pl vgclean  <storeid> <vmid> <snap>               remove the thinclones and the snapshot
+#
+# File restore (any snapshot of the guest's volume group, including Safeguarded ones):
+#   sw-snap.pl fsmap    <storeid> <vmid> <snap>               thinclone of every volume of the
+#                                                             snapshot, mapped to this node only;
+#                                                             prints "group <name>", then
+#                                                             "<source volume> <device>" per volume
+#   sw-snap.pl fsclean  <storeid> <group>                     remove such a thinclone group
 use strict;
 use warnings;
 use Time::HiRes qw(time);
@@ -141,8 +148,69 @@ if ($cmd eq 'prepare') {
     $run->('rmsnapshot', [snapshot => $snap, volumegroup => $vg])
         if $P->can('vg_snapshot_exists')->($scfg, $storeid, $vg, $snap);
     print "cleaned $snap\n";
+} elsif ($cmd eq 'fsmap') {
+    my ($vmid, $snap) = @a;
+    die "invalid VM id\n" if ($vmid // '') !~ m/^\d+$/;
+    die "invalid snapshot name\n" if ($snap // '') !~ m/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+    my $vg = $P->can('guest_vg_name')->($scfg, $vmid);
+    die "snapshot '$snap' not found in volume group '$vg'\n"
+        if !$P->can('vg_snapshot_exists')->($scfg, $storeid, $vg, $snap);
+    require Digest::MD5;
+    my $t = int(time());
+    # same naming as the plugin's snapshot access groups: the hourly cleanup removes leftovers
+    my $ro = $P->can('sw_prefix')->($scfg) . "-snapro-$vmid-$t-" . substr(Digest::MD5::md5_hex("files$snap$$"), 0, 6);
+    my $host = local_host();
+    $run->('mkvolumegroup', [type => 'thinclone', snapshot => $snap, fromsourcegroup => $vg,
+        name => $ro, pool => $scfg->{'sw-pool'}]);
+    my @out;
+    eval {
+        my $n = 0;
+        for my $r (@{ $P->can('sw_list')->($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$ro"]) }) {
+            my $d = $P->can('sw_show')->($scfg, $storeid, 'lsvdisk', [], $r->{id});
+            my $name = "$ro-" . $n++;
+            $run->('chvdisk', [name => $name], $r->{id});
+            $run->('mkvdiskhostmap', [force => undef, host => $host], $name);
+            push @out, [$d->{source_volume_name} // $d->{name}, $d->{vdisk_UID}];
+        }
+        die "the snapshot has no volume\n" if !@out;
+        for my $o (@out) {
+            my $dev = $P->can('uid_to_path')->($o->[1]);
+            my $wwid = $P->can('uid_to_wwid')->($o->[1]);
+            for my $i (1 .. 40) {
+                last if -b $dev;
+                $P->can('rescan_hosts')->($scfg) if $i % 5 == 1;
+                $P->can('multipath_add')->($wwid);
+                sleep(1);
+            }
+            die "device $dev did not show up\n" if !-b $dev;
+            $o->[2] = $dev;
+        }
+    };
+    if (my $e = $@) {
+        eval { fs_clean($ro) };
+        die $e;
+    }
+    print "group $ro\n";
+    print "$_->[0] $_->[2]\n" for @out;
+} elsif ($cmd eq 'fsclean') {
+    my ($g) = @a;
+    my $p = quotemeta($P->can('sw_prefix')->($scfg));
+    die "not a snapshot access group: " . ($g // '') . "\n" if ($g // '') !~ m/^${p}-snapro-\d+-\d+-[0-9a-f]{6}$/;
+    fs_clean($g);
+    print "cleaned $g\n";
 } else {
     die "unknown command: $cmd\n";
+}
+
+# Removes a thinclone group made for reading a snapshot: local devices, mappings, volumes, group.
+sub fs_clean {
+    my ($g) = @_;
+    return if !$P->can('sw_show_opt')->($scfg, $storeid, 'lsvolumegroup', [], $g);
+    for my $r (@{ $P->can('sw_list')->($scfg, $storeid, 'lsvdisk', [filtervalue => "volume_group_name=$g"]) }) {
+        eval { $P->can('device_remove_local')->($r->{vdisk_UID}) } if $r->{vdisk_UID};
+        $run->('rmvdisk', [removehostmappings => undef], $r->{name});
+    }
+    $run->('rmvolumegroup', [], $g);
 }
 
 # Thinclone group read by the backup. The name follows the plugin's snapshot access groups
