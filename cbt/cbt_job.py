@@ -21,10 +21,21 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import cbt_perf  # noqa: E402
 SETTINGS = "/etc/ibm-storage-cbt/settings.json"
 SLOT_DIR = "/run/lock/ibm-storage-cbt"
 DEFAULT_PARALLEL = 2
 MAX_PARALLEL = 16
+
+
+def _queued(pfile, vmid, since, limit, why):
+    try:
+        json.dump({"vmid": int(vmid), "phase": "queued", "started": since, "limit": limit, "why": why, "total": 0, "done": 0},
+                  open(pfile + ".tmp", "w"))
+        os.replace(pfile + ".tmp", pfile)
+    except OSError:
+        pass
 
 
 def max_parallel():
@@ -35,6 +46,19 @@ def max_parallel():
     return min(max(n, 1), MAX_PARALLEL)
 
 
+def vm_store(vmid):
+    """Storage of the VM's first plugin disk (the array whose latency is watched)."""
+    try:
+        cfg = subprocess.run(["qm", "config", str(vmid)], capture_output=True, text=True, timeout=30).stdout
+        stores = {l.split(": ", 1)[1].split(":")[0] for l in cfg.splitlines()
+                  if re.match(r"^(scsi|virtio|sata|ide)\d+: ", l) and "media=cdrom" not in l}
+        types = subprocess.run(["pvesm", "status"], capture_output=True, text=True, timeout=30).stdout
+        ours = {l.split()[0] for l in types.splitlines()[1:] if l.split()[1:2] and l.split()[1] in ("storwize", "flashsystem")}
+        return sorted(stores & ours)[0] if stores & ours else None
+    except (subprocess.SubprocessError, IndexError, OSError):
+        return None
+
+
 def take_slot(vmid):
     """Blocks until one of the node's backup slots is free; returns the open lock file (keep it
     open: the slot is released when the process ends, also if it is killed)."""
@@ -42,8 +66,20 @@ def take_slot(vmid):
     os.makedirs(SLOT_DIR, exist_ok=True)
     pfile = f"/run/ibm-storage-cbt-{vmid}.progress"
     since = int(time.time())
+    store, last_check = vm_store(vmid), [0, None]
     while True:
         n = max_parallel()                       # re-read: a changed limit applies to waiting jobs
+        # storage latency control: no new backup while the array is over the start limit
+        st = cbt_perf.settings()
+        lat = None
+        if st["latency_start_ms"] > 0 and store:
+            if time.time() - last_check[0] >= 15:
+                last_check[:] = [time.time(), cbt_perf.array_latency(store)]
+            lat = last_check[1]
+            if lat is not None and lat > st["latency_start_ms"]:
+                _queued(pfile, vmid, since, n, f"array latency {lat:.1f} ms (limit {st['latency_start_ms']:g} ms)")
+                time.sleep(5)
+                continue
         for i in range(n):
             f = open(f"{SLOT_DIR}/slot-{i}", "w")
             try:
@@ -53,12 +89,7 @@ def take_slot(vmid):
                 return f
             except BlockingIOError:
                 f.close()
-        try:
-            json.dump({"vmid": int(vmid), "phase": "queued", "started": since, "limit": n, "total": 0, "done": 0},
-                      open(pfile + ".tmp", "w"))
-            os.replace(pfile + ".tmp", pfile)
-        except OSError:
-            pass
+        _queued(pfile, vmid, since, n, "")
         time.sleep(5)
 
 

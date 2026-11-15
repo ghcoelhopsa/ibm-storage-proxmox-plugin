@@ -9,6 +9,7 @@
 #   sw-snap.pl delete  <storeid> <volname> <snap>             delete the snapshot (plugin)
 #
 # Volume group mode (sw-snapmode=volumegroup, Storage Virtualize 8.5+/9.x):
+#   sw-snap.pl latency  <storeid>                             array volume latency (ms): overall read write
 #   sw-snap.pl vgsnap   <storeid> <vmid> <snap>               addsnapshot of the guest volume group
 #   sw-snap.pl vgmap    <storeid> <vmid> <snap> <volname>...  thinclone of the snapshot, mapped to this
 #                                                             node only; prints "<volname> <device>"
@@ -82,6 +83,11 @@ if ($cmd eq 'prepare') {
     my ($v, $snap) = @a;
     $P->volume_snapshot_delete($scfg, $storeid, $v, $snap);
     print "deleted $v\@$snap\n";
+} elsif ($cmd eq 'latency') {
+    # volume latency of the array in ms: overall, read, write (lssystemstats, current values)
+    my %v = map { ($_->{stat_name} // '') => $_->{stat_current} }
+        @{ $P->can('sw_list')->($scfg, $storeid, 'lssystemstats', []) };
+    print join(' ', map { $v{$_} // 0 } qw(vdisk_ms vdisk_r_ms vdisk_w_ms)), "\n";
 } elsif ($cmd eq 'vgsnap') {
     my ($vmid, $snap) = @a;
     my $vg = $P->can('guest_vg_name')->($scfg, $vmid);

@@ -34,6 +34,9 @@ import time
 
 import nbd
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cbt_perf  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(HERE, "sw-snap.pl")
 STATE_DIR = "/var/lib/ibm-storage-cbt"               # before 0.3.4: state per node
@@ -403,6 +406,8 @@ def main():
 
         t = time.time()
         stats = {"read": 0, "sent": 0, "reused": 0, "zero": 0}
+        meter = cbt_perf.Meter(c.get("server"), WORKERS)
+        gov = cbt_perf.LatencyGovernor(array_store, WORKERS, cbt_perf.settings()["latency_throttle_ms"]).start()
         for k, d in disks.items():
             name = f"drive-{k}".encode()
             inc = mode == "incremental" and lib.proxmox_backup_check_incremental(handle, name, d["size"]) == 1
@@ -415,14 +420,23 @@ def main():
             def work(i, fd=fd, dev_id=dev_id, size=d["size"]):
                 off = i * CHUNK
                 ln = min(CHUNK, size - off)
-                data = os.pread(fd, ln, off)
+                gov.enter()                  # storage latency control: fewer readers when the array is slow
+                try:
+                    t1 = time.monotonic()
+                    data = os.pread(fd, ln, off)
+                    t2 = time.monotonic()
+                finally:
+                    gov.leave()
                 e = ctypes.c_char_p()
                 if ln == CHUNK and data == ZERO:
                     r = lib.proxmox_backup_write_data(handle, dev_id, None, off, ln, ctypes.byref(e))
+                    meter.add(read=t2 - t1, send=time.monotonic() - t2)
                     return ln, -1 if r < 0 else 0, "zero", e
                 r = lib.proxmox_backup_write_data(handle, dev_id, data, off, ln, ctypes.byref(e))
+                t3 = time.monotonic()
                 if r > 0:
                     throttle.take(ln)        # only what went to the PBS; known chunks do not travel
+                meter.add(read=t2 - t1, send=t3 - t2, limit=time.monotonic() - t3)
                 return ln, r, "data", e
 
             with cf.ThreadPoolExecutor(WORKERS) as ex:
@@ -432,7 +446,8 @@ def main():
                     stats["read"] += ln
                     if time.time() - last_p[0] > 2:
                         last_p[0] = time.time()
-                        progress(done=stats["read"])
+                        progress(done=stats["read"], readers=gov.allowed, readers_max=WORKERS,
+                                 latency_ms=gov.samples[-1] if gov.samples else None)
                     if kind == "zero":
                         stats["zero"] += ln
                     elif r == 0:
@@ -444,6 +459,8 @@ def main():
             devs[k] = {"size_GiB": round(d["size"] / 2 ** 30, 2), "incremental": inc,
                        "chunks_read": len(todo), "read_MiB": round(len(todo) * CHUNK / 2 ** 20, 1)}
         rep["t"]["read_and_send"] = round(time.time() - t, 2)
+        gov.close()
+        rep["bottleneck"] = meter.report(gov)
         progress(phase="finishing", done=stats["read"])
 
         conf = vzdump_config(vmid, disks, array_store)

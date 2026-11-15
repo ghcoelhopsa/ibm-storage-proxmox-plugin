@@ -360,6 +360,16 @@ usual way. If the snapshot path fails, the job falls back to the regular Proxmox
 Schedules are created on the **Backups** page. Each schedule becomes a systemd timer on the nodes,
 so it runs even when the panel is down. Retention is whatever is configured in PBS.
 
+**Storage latency control.** The backup watches the array volume latency: above the start limit
+(default 20 ms) new backups wait, above the slow-down limit (default 30 ms) running ones read with
+fewer threads, so production VMs keep their response time. Both limits are in **Backups ›
+Settings**.
+
+**Bottleneck.** Each backup reports how busy each stage was, as source (array), proxy (node CPU),
+network (link to the PBS) and target (PBS), and names the one that held it back. On Backups ›
+Latest runs, hover the bottleneck to see all of them. A full backup whose data is already in the
+PBS is CPU bound (hashing), not network bound.
+
 **Simultaneous backups.** Each node runs at most a set number of snapshot backups at the same
 time (**Backups › Settings**, default 2); manual and scheduled backups count alike, and the ones over
 the limit wait in a queue. A schedule can back up several of its VMs at a time (**VMs at a time**),
