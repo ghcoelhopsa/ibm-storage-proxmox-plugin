@@ -66,6 +66,15 @@ def rd(p):
         return open(p).read().strip()
     except OSError:
         return ""
+import hashlib
+FILES = ["/usr/share/perl5/PVE/Storage/Custom/StorwizePlugin.pm", "/usr/share/perl5/PVE/Storage/Custom/FlashSystemPlugin.pm",
+         "/usr/local/sbin/pve-ibm-storage"] + ["/usr/local/lib/ibm-storage-cbt/" + f for f in
+         ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "file_restore.py", "sw-snap.pl")]
+def sha(p):
+    try:
+        return hashlib.sha256(open(p, "rb").read()).hexdigest()
+    except OSError:
+        return None
 import math, struct
 def dbm(uw):
     return round(10 * math.log10(uw / 1000.0), 2) if uw > 0 else -40.0
@@ -153,6 +162,7 @@ print(json.dumps({
     "mpaths": run("multipath -ll 2>/dev/null | grep -c 'IBM,2145'"),
     "lvm_filter": run("lvmconfig devices/global_filter 2>/dev/null"),
     "cbt": rd("/usr/local/lib/ibm-storage-cbt/VERSION"),
+    "files": {f: sha(f) for f in FILES},
     "libnbd": "install ok installed" in run("dpkg-query -W -f '${Status}' python3-libnbd"),
     "guest_vgs": run("pvs --noheadings -o pv_name,vg_name --config 'devices{global_filter=[\"a|.*|\"]}' 2>/dev/null | grep -E 'mapper/36005076|dm-uuid-.*36005076' || true"),
 }))

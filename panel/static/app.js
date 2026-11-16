@@ -1498,10 +1498,18 @@ async function updateProgress(v) {
    ====================================================================== */
 async function pageNodes() {
   const nodes = await api("GET", "/nodes");
+  const split = nodeFileSplit(nodes);
   main.innerHTML = `<div class="page">${pageHeader({ title: "Proxmox nodes", sub: "Packages, multipath, plugin and snapshot backup on each node." })}
+    ${split.length ? notification("warn", "Plugin files differ between nodes", `${split.map(d => `<span class="mono">${esc(d.file)}</span>: <span data-noi18n>${d.groups.map(g => esc(g.join(", "))).join(" ≠ ")}</span>`).join("<br>")}<br>Every node must run the same files. <b>Prepare node</b> on each one installs the files of this release.`) : ""}
     <div class="g" style="grid-template-columns:1fr">${nodes.map(nodeCard).join("")}</div></div>`;
   $$("[data-trust]").forEach(b => b.onclick = () => trustNode(b.dataset.trust));
   $$("[data-prep]").forEach(b => b.onclick = () => prepareNode(nodes.find(n => n.node === b.dataset.prep)));
+}
+// Files installed on more than one node with different content (each node reports sha256 per file).
+function nodeFileSplit(nodes) {
+  const by = {};
+  nodes.filter(n => n.managed && n.files).forEach(n => Object.entries(n.files).forEach(([f, s]) => { if (s) ((by[f] = by[f] || {})[s] = by[f][s] || []).push(n.node); }));
+  return Object.entries(by).filter(([, s]) => Object.keys(s).length > 1).map(([file, s]) => ({ file, groups: Object.values(s) }));
 }
 function nodeCard(n) {
   const online = n.online ? status("ok", "Online") : status("err", "Offline");
@@ -1509,18 +1517,19 @@ function nodeCard(n) {
   if (!n.managed) return `<section class="tile node-card">${title}<p class="muted node-sub"><span class="mono">${esc(n.ip)}</span></p>
     ${emptyState("locked", "Node not authorized yet", "To install packages, multipath and the plugin, the panel needs SSH access to the node. The root password is used once to install the panel key and is not stored.",
       ME.admin ? btn("Authorize the panel", "primary", `data-trust="${esc(n.node)}"`, "password") : "")}</section>`;
-  const pk = n.packages || {}, plugOk = n.plugin && n.plugin === n.plugin_current;
+  const mod = n.modified || [], pk = n.packages || {}, plugOk = n.plugin && n.plugin === n.plugin_current && !mod.some(f => !f.includes("/ibm-storage-cbt/"));
   const ready = plugOk && n.multipath_ok && n.lvm_filter_ok && pk["multipath-tools"] && pk["sg3-utils"] && n.multipathd === "active";
   return `<section class="tile node-card">${title}<p class="muted node-sub"><span class="mono">${esc(n.ip)}</span> · ${esc((String(n.pveversion).match(/pve-manager\/([\d.]+)/) || [])[1] ? "Proxmox VE " + String(n.pveversion).match(/pve-manager\/([\d.]+)/)[1] : n.pveversion)} ${esc((String(n.pveversion).match(/kernel: (\S+)\)/) || [])[1] ? "· kernel " + String(n.pveversion).match(/kernel: (\S+)\)/)[1] : "")}</p>
     ${ready ? notification("ok", "Ready for IBM storages") : notification("warn", "Preparation pending", "Use <b>Prepare node</b> to finish.")}
+    ${mod.length ? notification("warn", "Files changed on this node", `${mod.map(f => `<span class="mono">${esc(f)}</span>`).join("<br>")}<br>Same version number as this release, different content: someone changed them on the node. <b>Prepare node</b> puts the release files back.`) : ""}
     ${n.guest_vgs && !n.lvm_filter_ok ? notification("err", "The host can see the LVM inside the VMs", "Apply the <b>LVM filter</b> in Prepare node. Without it, the host can activate VM volumes and corrupt data.") : ""}
     <div class="node-grid">
       <div><h4 class="node-h">Preparation</h4>${sl([
         ["Packages", status(pk["multipath-tools"] && pk["sg3-utils"] ? "ok" : "warn", pk["multipath-tools"] && pk["sg3-utils"] ? "multipath-tools, sg3-utils" : "pending")],
         ["Multipath", status(n.multipathd === "active" && n.multipath_ok ? "ok" : n.multipathd === "active" ? "warn" : "err", n.multipathd !== "active" ? (n.multipathd || "stopped") : n.multipath_ok ? "active, IBM 2145 rule" : "active, no IBM rule")],
         ["LVM filter", status(n.lvm_filter_ok ? "ok" : "err", n.lvm_filter_ok ? "IBM volumes ignored" : "host reads the VMs' LVM")],
-        ["Plugin", n.plugin ? status(plugOk ? "ok" : "warn", plugOk ? `v${n.plugin}` : `v${n.plugin} → v${n.plugin_current}`) : status("warn", "not installed")],
-        ["Snapshot backup", n.cbt ? status(n.cbt === ME.version ? "ok" : "warn", n.cbt === ME.version ? `v${n.cbt}` : `v${n.cbt} → v${ME.version}`) : status("warn", "not installed")],
+        ["Plugin", n.plugin ? status(plugOk ? "ok" : "warn", plugOk ? `v${n.plugin}` : n.plugin === n.plugin_current ? `v${n.plugin} · changed on the node` : `v${n.plugin} → v${n.plugin_current}`) : status("warn", "not installed")],
+        ["Snapshot backup", n.cbt ? (n.cbt === ME.version && mod.some(f => f.includes("/ibm-storage-cbt/")) ? status("warn", `v${n.cbt} · changed on the node`) : status(n.cbt === ME.version ? "ok" : "warn", n.cbt === ME.version ? `v${n.cbt}` : `v${n.cbt} → v${ME.version}`)) : status("warn", "not installed")],
         ["Storage API", esc(String(n.apiver || "").replace(/^(\d+) (\d+)$/, "$1 (age $2)"))]])}</div>
       <div><h4 class="node-h">Fibre Channel</h4>${(n.fc || []).length ? `<table class="mini node-fc"><thead><tr><th>Port</th><th>WWPN</th><th>State</th><th class="num">Tx</th><th class="num">Rx</th><th class="num">Temp.</th></tr></thead><tbody>
         ${n.fc.map(f => `<tr><td>${esc(f.host)}</td><td class="mono">${esc(f.wwpn)}</td><td>${status(f.state === "Online" ? "ok" : "err", f.state === "Online" ? f.speed || "online" : f.state)}</td>
@@ -1555,8 +1564,8 @@ async function prepareNode(n) {
       <details><summary class="cds--link" style="cursor:pointer">View the multipath.conf differences</summary><pre class="term" style="margin-top:.75rem">${diff || "No differences."}</pre></details>
       ${checkbox("pp-lvm", "Apply the <b>LVM filter</b>: the host stops reading LVM inside the IBM volumes (VM disks), backing up lvm.conf", !n.lvm_filter_ok)}
       ${checkbox("pp-nv", "Prepare <b>NVMe over TCP</b>: nvme-cli, the nvme-tcp module, the node NQN and a round-robin path policy (native multipath)", false)}
-      ${checkbox("pp-cbt", "Install or update the <b>array snapshot backup</b> (QEMU CBT + FlashCopy → PBS) and the python3-libnbd dependency", n.cbt !== ME.version)}
-      ${checkbox("pp-pl", `Install or update the plugin (v${esc(n.plugin_current)}) and restart the Proxmox services`, n.plugin !== n.plugin_current)}</div>
+      ${checkbox("pp-cbt", "Install or update the <b>array snapshot backup</b> (QEMU CBT + FlashCopy → PBS) and the python3-libnbd dependency", n.cbt !== ME.version || (n.modified || []).some(f => f.includes("/ibm-storage-cbt/")))}
+      ${checkbox("pp-pl", `Install or update the plugin (v${esc(n.plugin_current)}) and restart the Proxmox services`, n.plugin !== n.plugin_current || (n.modified || []).some(f => !f.includes("/ibm-storage-cbt/")))}</div>
       ${notification("info", "Running VMs are not affected.", "The Proxmox GUI reconnects by itself a few seconds after pveproxy restarts.")}<div id="pp-log"></div>`,
     buttons: [{ id: "no", label: "Close" }, { id: "go", label: "Run", kind: "primary" }],
     onButton: async (id, root) => {

@@ -24,7 +24,7 @@ if [ "${1:-}" = "--uninstall" ]; then
         echo "         Remove them first (pvesm remove <id>), or PVE will complain about the unknown type." >&2
         read -r -p "Continue anyway? [y/N] " a; [ "$a" = "y" ] || exit 1
     fi
-    rm -f "$DEST/$MOD" "$DEST/FlashSystemPlugin.pm" /usr/local/sbin/pve-ibm-storage /usr/local/sbin/pve-storwize
+    rm -f "$DEST/$MOD" "$DEST/FlashSystemPlugin.pm" /usr/local/sbin/pve-ibm-storage /usr/local/sbin/pve-storwize /usr/share/ibm-storage-plugin/plugin.sha256
     restart_services
     echo "plugin removed (keys in $PRIV kept)"
     exit 0
@@ -51,6 +51,9 @@ install -d -m 0755 "$DEST"
 install -m 0644 "$REPO/src/PVE/Storage/Custom/$MOD" "$DEST/$MOD"
 install -m 0644 "$REPO/src/PVE/Storage/Custom/FlashSystemPlugin.pm" "$DEST/FlashSystemPlugin.pm"
 install -m 0755 "$REPO/bin/pve-ibm-storage" /usr/local/sbin/pve-ibm-storage
+# what was installed, so a file changed later shows up (pve-ibm-storage verify, Proxmox log)
+install -d -m 0755 /usr/share/ibm-storage-plugin
+sha256sum "$DEST/$MOD" "$DEST/FlashSystemPlugin.pm" /usr/local/sbin/pve-ibm-storage > /usr/share/ibm-storage-plugin/plugin.sha256
 
 if [ -d /etc/pve/priv ]; then
     mkdir -p "$PRIV"

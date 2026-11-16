@@ -7,6 +7,7 @@
 #   pve-ibm-storage inventory [storeid]  VM/CT <-> volume (UID, size, snapshots)
 #   pve-ibm-storage orphans [storeid]    volumes with the prefix that no VM/CT uses
 #   pve-ibm-storage stale-paths          local multipath maps with no volume on any array
+#   pve-ibm-storage verify [--local]     installed files vs. install manifest and other nodes
 #   pve-ibm-storage trash [storeid]      removed disks kept on the array (sw-trash-days)
 #   pve-ibm-storage trash-restore <storeid> <volume> [vmid]
 #                                        put a disk back (as an unused disk of the VM/CT)
@@ -299,6 +300,76 @@ if ($cmd eq 'list') {
     }
     out(\@rows, [qw(map dm paths volume state)]);
 
+} elsif ($cmd eq 'verify') {
+    # Installed plugin files on every node, against the manifest written at install time and
+    # against each other. Exit code 1 when something differs.
+    my $local_only = grep { $_ eq '--local' } @ARGV;
+    my $me = PVE::INotify::nodename();
+    my $mine = sub {
+        return { node => $me, version => $P->VERSION, files => $P->can('install_check')->() };
+    };
+    if ($local_only) {
+        print JSON->new->canonical->encode($mine->()) . "\n";
+        exit 0;
+    }
+    my @nodes = ($mine->());
+    PVE::Cluster::cfs_update();
+    my $members = PVE::Cluster::get_members() // {};
+    for my $n (sort keys %$members) {
+        next if $n eq $me;
+        if (!$members->{$n}->{online}) {
+            push @nodes, { node => $n, error => 'offline' };
+            next;
+        }
+        my $out = '';
+        my $ok = eval {
+            require PVE::SSHInfo;
+            my $c = PVE::SSHInfo::ssh_info_to_command(PVE::SSHInfo::get_ssh_info($n),
+                '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
+            push @$c, '/usr/local/sbin/pve-ibm-storage verify --local';
+            PVE::Tools::run_command($c, outfunc => sub { $out .= $_[0] }, errfunc => sub { },
+                timeout => 60, noerr => 1) == 0;
+        };
+        my $d = $ok ? eval { decode_json($out) } : undef;
+        push @nodes, $d // { node => $n,
+            error => $ok ? 'older plugin without verify' : 'unreachable' };
+    }
+    my %sums;    # file -> sha256 -> [nodes]
+    for my $d (grep { !$_->{error} } @nodes) {
+        push @{ $sums{ $_->{file} }->{ $_->{sha256} // 'absent' } }, $d->{node} for @{ $d->{files} };
+    }
+    my %versions = map { $_->{version} => 1 } grep { $_->{version} } @nodes;
+    my ($rows, $bad) = ([], 0);
+    for my $d (@nodes) {
+        if ($d->{error}) {
+            push @$rows, { node => $d->{node}, version => '', file => '', state => $d->{error} };
+            $bad++;
+            next;
+        }
+        for my $r (@{ $d->{files} }) {
+            my @state = $r->{state} eq 'ok' ? () : ($r->{state});
+            my $s = $sums{ $r->{file} };
+            if (keys(%$s) > 1) {
+                my @other = sort grep { $_ ne $d->{node} }
+                    map { @{ $s->{$_} } } grep { $_ ne ($r->{sha256} // 'absent') } keys %$s;
+                push @state, "differs from @other" if @other;
+            }
+            $bad++ if grep { $_ ne 'unrecorded' } @state;
+            push @$rows, { node => $d->{node}, version => $d->{version}, file => $r->{file},
+                state => @state ? join(', ', @state) : 'ok', sha256 => $r->{sha256} // '' };
+        }
+    }
+    $bad++ if keys(%versions) > 1;
+    if ($json) {
+        print JSON->new->canonical->encode({ nodes => \@nodes, rows => $rows, ok => $bad ? 0 : 1 }) . "\n";
+    } else {
+        out($rows, [qw(node version file state)]);
+        print "\nplugin versions differ between nodes: " . join(', ', sort keys %versions) . "\n"
+            if keys(%versions) > 1;
+        print $bad ? "\ndifferences found\n" : "\nall nodes match what was installed\n";
+    }
+    exit($bad ? 1 : 0);
+
 } else {
     print <<'EOF';
 usage: pve-ibm-storage [--json] <command>
@@ -307,6 +378,7 @@ usage: pve-ibm-storage [--json] <command>
   inventory [storeid]  VM/CT <-> volume on the array
   orphans [storeid]    volumes with the prefix that no VM/CT owns
   stale-paths [--remove]  multipath maps of volumes the array no longer maps to this node
+  verify [--local]     installed plugin files on every node: changed since install, or different between nodes
   trash [storeid]      removed disks kept on the array (sw-trash-days, default 7)
   trash-restore <storeid> <volume> [vmid]   put a disk back as an unused disk of the VM/CT
   trash-delete <storeid> <volume>           delete a disk from the trash now

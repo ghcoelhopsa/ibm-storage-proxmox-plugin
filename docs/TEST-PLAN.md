@@ -77,3 +77,7 @@ the tests marked with (auto).
 | T70 | delete a disk mapped on two nodes | disk with a partition table (kpartx maps) active on both nodes; delete from one | map, partition maps and SCSI disks gone on both nodes; no failed paths | Passed |
 | T71 | delete a disk open on the other node | hold the device open on node 2, delete from node 1 | delete stops before the unmap with "still in use on node(s)"; works once released | Passed |
 | T72 | orphan cleanup | maps left by 0.4.0 deletes (15 + 9, some with partition maps) | listed by `stale-paths`, removed by the sweep; none in use touched; 0 failed paths after | Passed |
+| T73 | new volume gets the SCSI LUN id of an orphan map | volume A active on node 1, unmapped and deleted on the array only; volume B created (got LUN 66, same as A) and activated | orphan map of A removed after 8 s, B active in 12 s | Passed |
+| T74 | file changed on a node | append a line to StorwizePlugin.pm on node 2 | Proxmox log warning on node 2; `verify` shows "modified" on node 2 and "differs" on both, exit 1; all ok after restoring | Passed |
+| T75 | panel shows changed files | node status with one plugin file changed on node 2 | page warning (servidor02 ≠ servidor01), node card "changed on the node", Prepare node opens with the plugin option checked | Passed |
+| T76 | schedule by pool | pool virtcloud-backup with 2 VMs on node 2 | form lists the pool with its VM count; each node resolves the members and keeps only its own VMs; missing pool skipped with a message | Passed |
