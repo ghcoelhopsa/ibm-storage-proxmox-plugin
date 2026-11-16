@@ -67,15 +67,7 @@ if ($cmd eq 'prepare') {
     my $host = (split(/,/, $scfg->{'sw-hosts'} // ''))[0] or die "sw-hosts is empty\n";
     $run->('mkvdiskhostmap', [force => undef, host => $host], $tgt);
     my $uid = $P->can('vdisk_info')->($scfg, $storeid, $tgt)->{vdisk_UID};
-    my $dev = $P->can('uid_to_path')->($uid);
-    my $wwid = $P->can('uid_to_wwid')->($uid);
-    for my $i (1 .. 40) {
-        last if -b $dev;
-        $P->can('rescan_hosts')->($scfg) if $i % 5 == 1;
-        $P->can('multipath_add')->($wwid);
-        sleep(1);
-    }
-    die "device $dev did not show up\n" if !-b $dev;
+    my $dev = wait_dev($uid);
     print "$dev\n";
 } elsif ($cmd eq 'unmap') {
     my ($v, $snap) = @a;
@@ -123,15 +115,7 @@ if ($cmd eq 'prepare') {
     }
     for my $v (@vols) {
         my $uid = $by_src{ $P->can('vdisk_name')->($scfg, $v) }->{vdisk_UID};
-        my $dev = $P->can('uid_to_path')->($uid);
-        my $wwid = $P->can('uid_to_wwid')->($uid);
-        for my $i (1 .. 40) {
-            last if -b $dev;
-            $P->can('rescan_hosts')->($scfg) if $i % 5 == 1;
-            $P->can('multipath_add')->($wwid);
-            sleep(1);
-        }
-        die "device $dev did not show up\n" if !-b $dev;
+        my $dev = wait_dev($uid);
         print "$v $dev\n";
     }
 } elsif ($cmd eq 'vgclean') {
@@ -174,15 +158,7 @@ if ($cmd eq 'prepare') {
         }
         die "the snapshot has no volume\n" if !@out;
         for my $o (@out) {
-            my $dev = $P->can('uid_to_path')->($o->[1]);
-            my $wwid = $P->can('uid_to_wwid')->($o->[1]);
-            for my $i (1 .. 40) {
-                last if -b $dev;
-                $P->can('rescan_hosts')->($scfg) if $i % 5 == 1;
-                $P->can('multipath_add')->($wwid);
-                sleep(1);
-            }
-            die "device $dev did not show up\n" if !-b $dev;
+            my $dev = wait_dev($o->[1]);
             $o->[2] = $dev;
         }
     };
@@ -200,6 +176,28 @@ if ($cmd eq 'prepare') {
     print "cleaned $g\n";
 } else {
     die "unknown command: $cmd\n";
+}
+
+# Waits for the multipath device of a volume just mapped to this node. After 8 s it removes the
+# maps of volumes the array no longer maps here (once per run): one of them can hold the SCSI
+# LUN id the array has just given to this volume, and then the rescan never finds it.
+my $swept = 0;
+sub wait_dev {
+    my ($uid) = @_;
+    my $dev = $P->can('uid_to_path')->($uid);
+    my $wwid = $P->can('uid_to_wwid')->($uid);
+    for my $i (1 .. 40) {
+        last if -b $dev;
+        if ($i == 9 && !$swept++) {
+            eval { $P->can('orphan_sweep')->($scfg, $storeid) };
+            warn "orphan multipath maps: $@" if $@;
+        }
+        $P->can('rescan_hosts')->($scfg) if $i % 5 == 1;
+        $P->can('multipath_add')->($wwid);
+        sleep(1);
+    }
+    die "device $dev did not show up\n" if !-b $dev;
+    return $dev;
 }
 
 # Removes a thinclone group made for reading a snapshot: local devices, mappings, volumes, group.
