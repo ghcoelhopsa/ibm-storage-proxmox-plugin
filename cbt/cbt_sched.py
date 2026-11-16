@@ -5,6 +5,9 @@ node, `parallel` of them at a time (default 1). Each job also takes one of the n
 systemd timer (ibm-storage-cbt-sched-<id>.timer), created by the panel.
 
   cbt_sched.py <id>      reads /etc/ibm-storage-cbt/schedules/<id>.json
+
+A schedule picks VMs by id ("vmids") and/or by Proxmox resource pool ("pools"). Pool members are read
+at every run, so VMs added to or removed from the pool (a cloud portal does that) need no change here.
 """
 import concurrent.futures as cf
 import json
@@ -25,12 +28,27 @@ def active(pattern):
     return [l.split()[0] for l in o.splitlines() if l.strip()]
 
 
+def pool_vmids(pools):
+    """QEMU VMs that are members of the pools right now (missing pools are skipped)."""
+    out = set()
+    for pool in pools:
+        p = subprocess.run(["pvesh", "get", "/pools", "--poolid", pool, "--output-format", "json"],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            print(f"pool {pool}: {p.stderr.strip()}", file=sys.stderr)
+            continue
+        for g in json.loads(p.stdout or "[]"):
+            out.update(int(m["vmid"]) for m in g.get("members") or [] if m.get("type") == "qemu" and not m.get("template"))
+    return out
+
+
 def main():
     sid = sys.argv[1]
     cfg = json.load(open(f"{SCHED_DIR}/{sid}.json"))
     os.makedirs(LOG_DIR, exist_ok=True)
     flags = ("" if cfg.get("fallback", True) else " --no-fallback") + (" --protected" if cfg.get("protected") else "")
-    here = [int(v) for v in cfg["vmids"] if os.path.exists(f"/etc/pve/qemu-server/{int(v)}.conf")]
+    wanted = {int(v) for v in cfg.get("vmids") or []} | pool_vmids(cfg.get("pools") or [])
+    here = sorted(v for v in wanted if os.path.exists(f"/etc/pve/qemu-server/{v}.conf"))
     # VMs on other nodes (or removed) are left to the timer there
     ts_lock, last_ts = threading.Lock(), [0]
 

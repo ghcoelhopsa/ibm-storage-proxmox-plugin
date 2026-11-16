@@ -2612,6 +2612,12 @@ def backup_overview(s):
                 pve_jobs.append({"id": j.get("id"), "all": bool(to_int(j.get("all"))), "vmids": [to_int(x) for x in str(j.get("vmid") or "").split(",") if x]})
     except HTTPException:
         pass
+    pools = []
+    try:
+        pools = sorted(({"pool": p.get("poolid"), "members": sum(1 for m in p.get("members") or [] if m.get("type") == "qemu")}
+                        for p in pcall(s, "GET", "/pools") or [] if p.get("poolid")), key=lambda p: p["pool"])
+    except HTTPException:
+        pass
     limits = {n: to_int((d.get("settings") or {}).get("max_parallel")) or backup.DEFAULT_PARALLEL
               for n, d in nodes.items() if not d.get("error")}
     first = next((d.get("settings") or {} for d in nodes.values() if not d.get("error")), {})
@@ -2621,7 +2627,7 @@ def backup_overview(s):
                          "latency_start_ms": first.get("latency_start_ms", backup.DEFAULT_LAT_START),
                          "latency_throttle_ms": first.get("latency_throttle_ms", backup.DEFAULT_LAT_THROTTLE)},
             "schedules": sorted(scheds.values(), key=lambda c: c["name"].lower()),
-            "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs,
+            "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs, "pools": pools,
             "nodes": {n: {"error": d.get("error"), "installed": d.get("installed")} for n, d in nodes.items()},
             "vms": sorted(({"vmid": g["vmid"], "name": g.get("name"), "node": g.get("node")} for g in guests.values() if g.get("type") == "qemu" and not g.get("template")),
                           key=lambda g: g["vmid"])}

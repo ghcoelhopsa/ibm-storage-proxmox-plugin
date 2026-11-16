@@ -2003,7 +2003,8 @@ async function pageBackups(tab = "andamento") {
   if (tab === "agendamentos") mount($("#bk-tab"), dataTable({ title: "Schedules", search: false, empty: "No schedule. Snapshot backup only runs when started or scheduled here.", rows: B.schedules,
     desc: "Each schedule becomes a systemd timer on the nodes: it runs even if the panel is down. Retention is the one configured in PBS (datastore prune).", columns: [
     { t: "Name", key: "name", render: c => `<b>${esc(c.name)}</b>` },
-    { t: "VMs", render: c => c.vmids.map(v => `${v}${inPve(v) ? ` ${tag("also in Proxmox", "warn", "This VM is also in a Proxmox backup job: it will be backed up twice")}` : ""}`).join(", ") },
+    { t: "VMs", render: c => [...(c.pools || []).map(p => `${tag("pool", "teal")} <span data-noi18n>${esc(p)}</span>`),
+      ...c.vmids.map(v => `${v}${inPve(v) ? ` ${tag("also in Proxmox", "warn", "This VM is also in a Proxmox backup job: it will be backed up twice")}` : ""}`)].join(", ") },
     { t: "PBS", key: "pbs" }, { t: "When", render: c => esc(schedWhen(c)) },
     { t: "At a time", num: 1, render: c => esc(c.parallel || 1) },
     { t: "Next", sortVal: c => c.next || 0, render: c => !c.enabled ? tag("paused", "neutral") : c.next ? esc(dt(c.next)) : `<span class="muted">–</span>` },
@@ -2071,12 +2072,15 @@ async function backupSettingsFlow(B, done) {
 }
 async function schedFlow(B, s, done) {
   const pbs = await api("GET", "/pbs-storages");
-  const sel = new Set(s ? s.vmids : []), days = new Set(s ? s.days : []);
+  const sel = new Set(s ? s.vmids : []), days = new Set(s ? s.days : []), psel = new Set(s ? s.pools || [] : []);
   await modal({ title: s ? "Edit schedule" : "New schedule", size: "md",
     body: `<div class="form-stack">${textInput("sc-n", "Name", `value="${esc(s ? s.name : "")}" maxlength="60" placeholder="Daily 02:00"`)}
       ${selectInput("sc-p", "Target PBS storage", pbs.map(p => ({ v: p.storage, t: `${p.storage} (${p.datastore})`, sel: s && s.pbs === p.storage })))}
       <div class="g g-2">${textInput("sc-t", "Time", `type="time" value="${esc(s ? s.time : "02:00")}"`)}<div class="cds--form-item"><span class="cds--label">Days (none checked = every day)</span>
         <div class="inline-checks">${Object.keys(DAY_LABEL).map(d => checkbox("sc-d-" + d, DAY_LABEL[d], days.has(d), `data-day="${d}"`)).join("")}</div></div></div>
+      <div class="cds--form-item"><span class="cds--label">Proxmox pools</span><div style="max-height:8rem;overflow:auto;border:1px solid var(--cds-border-subtle-01);padding:.5rem .75rem;width:100%">
+        ${(B.pools || []).map(p => checkbox("sc-pl-" + p.pool, `<b data-noi18n>${esc(p.pool)}</b> <span class="helper">${esc(p.members)} VM(s) now</span>`, psel.has(p.pool), `data-pool="${esc(p.pool)}"`)).join("") || `<span class="muted">No pools in Proxmox.</span>`}</div>
+        <div class="cds--form__helper-text">Every VM in the pool at the time of the run is backed up: VMs added or removed later need no change here (use it when a portal creates the VMs).</div></div>
       <div class="cds--form-item"><span class="cds--label">VMs</span><div style="max-height:14rem;overflow:auto;border:1px solid var(--cds-border-subtle-01);padding:.5rem .75rem;width:100%">
         ${B.vms.map(v => checkbox("sc-v-" + v.vmid, `<b>${v.vmid}</b> <span data-noi18n>${esc(v.name || "")}</span> <span class="helper" data-noi18n>${esc(v.node || "")}</span>`, sel.has(v.vmid), `data-vm="${v.vmid}"`)).join("") || `<span class="muted">No VMs.</span>`}</div>
         <div class="cds--form__helper-text">Only VMs with disks on plugin storage use the snapshot; the others fall back to the regular backup.</div></div>
@@ -2089,7 +2093,7 @@ async function schedFlow(B, s, done) {
     onButton: async (id, root) => {
       if (id !== "go") return false;
       const body = { id: s ? s.id : undefined, name: $("#sc-n").value.trim(), pbs: $("#sc-p").value, time: $("#sc-t").value, enabled: s ? s.enabled : true,
-        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), fallback: $("#sc-f").checked, protected: $("#sc-pr").checked, parallel: +$("#sc-par").value };
+        days: $$("[data-day]", root).filter(x => x.checked).map(x => x.dataset.day), vmids: $$("[data-vm]", root).filter(x => x.checked).map(x => +x.dataset.vm), pools: $$("[data-pool]", root).filter(x => x.checked).map(x => x.dataset.pool), fallback: $("#sc-f").checked, protected: $("#sc-pr").checked, parallel: +$("#sc-par").value };
       try { const r = await busy($("[data-b=go]", root), () => api("POST", "/backup/schedules", body));
         const bad = r.nodes.filter(n => !n.ok); toast(bad.length ? "warn" : "ok", "Schedule saved", bad.length ? bad.map(n => `${n.node}: ${n.error}`).join(" · ") : ""); done(); return false; }
       catch (e) { toast("err", "Could not save", e.message); return true; }
