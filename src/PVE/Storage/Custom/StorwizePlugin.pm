@@ -1250,13 +1250,17 @@ sub snapro_find {
 }
 
 sub snapro_wait_dev {
-    my ($scfg, $uid) = @_;
+    my ($scfg, $uid, $storeid) = @_;
     my $dev = uid_to_path($uid);
     my $wwid = uid_to_wwid($uid);
     my $deadline = time() + $DEV_WAIT;
     my $n = 0;
     while (!-b $dev) {
         die "storwize: device $dev did not appear after ${DEV_WAIT}s\n" if time() > $deadline;
+        if ($n == 8 && defined($storeid)) {          # same reason as in activate_volume
+            eval { orphan_sweep($scfg, $storeid) };
+            warn "storwize: orphan multipath maps: $@" if $@;
+        }
         if ($n++ % 5 == 0) {
             rescan_hosts($scfg);
             udev_settle();
@@ -1297,7 +1301,7 @@ sub snapro_activate {
     map_vdisk($scfg, $storeid, $v) if !@$maps;
     my $info = vdisk_info($scfg, $storeid, $v) or die "storwize: '$v' not found\n";
     file_set_contents(snapro_file($storeid, $key), "$info->{vdisk_UID}\n", 0600);
-    snapro_wait_dev($scfg, $info->{vdisk_UID});
+    snapro_wait_dev($scfg, $info->{vdisk_UID}, $storeid);
     return 1;
 }
 
@@ -1856,7 +1860,13 @@ sub activate_volume {
         die "storwize: device $dev did not appear after ${DEV_WAIT}s"
             . " (check zoning/mapping and 'multipath -ll')\n" if time() > $deadline;
         sleep(1);
-        if (++$n % 5 == 0) {
+        if (++$n == 8) {
+            # Dead maps of volumes deleted moments ago can still hold the SCSI LUN id the array just reused for
+            # this one, so the rescan never sees it. Do not wait for the periodic sweep: clear them now.
+            eval { orphan_sweep($scfg, $storeid) };
+            warn "storwize: orphan multipath maps: $@" if $@;
+        }
+        if ($n % 5 == 0) {
             rescan_hosts($scfg);
             multipath_add($wwid);
         }
