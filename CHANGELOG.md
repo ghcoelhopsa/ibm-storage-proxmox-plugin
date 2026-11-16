@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.2-beta - 2026-11-16
+- Fix: creating or cloning a disk could fail with "device ... did not appear after 30s" right
+  after another disk was deleted. A multipath map left behind by the delete still held the SCSI
+  LUN id, the array gave that id to the new volume, and the node never saw it. When a new device
+  is not there after 8 s, the node now removes the maps of volumes the array no longer maps to it
+  and rescans, instead of waiting for the periodic cleanup. Also when the backup and the file
+  restore map snapshot volumes.
+- The plugin warns when its files were changed on a node after they were installed. Prepare node
+  and `scripts/install.sh` record the sha256 of what they install; the plugin checks it every hour
+  (warning in the Proxmox log), **Proxmox nodes** in the panel shows the changed files and the
+  files that differ between nodes, and the new `pve-ibm-storage verify` compares every node.
+- Snapshot backup schedules can pick Proxmox resource pools. The pool members are read at every
+  run, so VMs a portal adds to the pool are backed up with no change to the schedule.
+
 ## 0.4.1-beta - 2026-11-15
 - Fix: deleting a disk left its multipath map behind on the other nodes of the cluster. The disk
   is mapped to every node, but only the node that ran the delete removed its device; on the others

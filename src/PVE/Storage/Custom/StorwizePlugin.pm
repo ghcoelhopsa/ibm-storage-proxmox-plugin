@@ -25,7 +25,7 @@ use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
 
-our $VERSION = '0.4.1';
+our $VERSION = '0.4.2';
 
 # Storage API this module was validated against (PVE 9.2, libpve-storage-perl 9.1).
 my $TESTED_APIVER = 14;
@@ -999,6 +999,66 @@ sub orphan_sweep {
     return $list;
 }
 
+# ---------------------------------------------------------------------------
+# Installed files: what the installer wrote against what is on disk now
+# ---------------------------------------------------------------------------
+
+# The installer (panel Prepare node, scripts/install.sh) writes <set>.sha256 in $MANIFEST_DIR
+# with the sha256 of each file it installs. A file changed by hand afterwards keeps the same
+# version number, so the version alone does not show it.
+our $MANIFEST_DIR = '/usr/share/ibm-storage-plugin';
+our %INSTALLED_FILES = (
+    plugin => [
+        '/usr/share/perl5/PVE/Storage/Custom/StorwizePlugin.pm',
+        '/usr/share/perl5/PVE/Storage/Custom/FlashSystemPlugin.pm',
+        '/usr/local/sbin/pve-ibm-storage',
+    ],
+    cbt => [ map { "/usr/local/lib/ibm-storage-cbt/$_" }
+        qw(cbt_backup.py cbt_job.py cbt_sched.py cbt_perf.py file_restore.py sw-snap.pl) ],
+);
+
+sub file_sha256 {
+    my ($path) = @_;
+    return undef if !-f $path;
+    require Digest::SHA;
+    return eval { Digest::SHA->new(256)->addfile($path)->hexdigest };
+}
+
+# One row per known file: set, file, sha256 (undef when absent), expected (from the manifest),
+# state: ok | modified | missing | unrecorded (installed without a manifest, e.g. by hand).
+sub install_check {
+    my ($dir) = @_;
+    $dir //= $MANIFEST_DIR;
+    my @out;
+    for my $set (sort keys %INSTALLED_FILES) {
+        my %want;
+        if (open(my $fh, '<', "$dir/$set.sha256")) {
+            while (my $l = <$fh>) {
+                $want{$2} = $1 if $l =~ m/^([0-9a-f]{64})\s+\*?(\/\S+)\s*$/;
+            }
+            close($fh);
+        }
+        for my $f (@{ $INSTALLED_FILES{$set} }) {
+            my $sum = file_sha256($f);
+            next if !defined($sum) && !defined($want{$f});
+            my $state = !defined($want{$f}) ? 'unrecorded'
+                : !defined($sum) ? 'missing'
+                : $sum eq $want{$f} ? 'ok' : 'modified';
+            push @out, { set => $set, file => $f, sha256 => $sum, expected => $want{$f}, state => $state };
+        }
+    }
+    return \@out;
+}
+
+sub install_warn {
+    my @bad = grep { $_->{state} eq 'modified' || $_->{state} eq 'missing' } @{ install_check() };
+    return if !@bad;
+    warn "storwize: plugin $VERSION: files changed since they were installed: "
+        . join(', ', map { "$_->{file} ($_->{state})" } @bad)
+        . " - run Prepare node in the panel (or scripts/install.sh) to put the release files back,"
+        . " or 'pve-ibm-storage verify' to compare the nodes\n";
+}
+
 # Host object of this node on the array (cached: it only changes when the node is re-zoned).
 sub local_host_name {
     my ($scfg, $storeid) = @_;
@@ -1250,13 +1310,17 @@ sub snapro_find {
 }
 
 sub snapro_wait_dev {
-    my ($scfg, $uid) = @_;
+    my ($scfg, $uid, $storeid) = @_;
     my $dev = uid_to_path($uid);
     my $wwid = uid_to_wwid($uid);
     my $deadline = time() + $DEV_WAIT;
     my $n = 0;
     while (!-b $dev) {
         die "storwize: device $dev did not appear after ${DEV_WAIT}s\n" if time() > $deadline;
+        if ($n == 8 && defined($storeid)) {          # same reason as in activate_volume
+            eval { orphan_sweep($scfg, $storeid) };
+            warn "storwize: orphan multipath maps: $@" if $@;
+        }
         if ($n++ % 5 == 0) {
             rescan_hosts($scfg);
             udev_settle();
@@ -1297,7 +1361,7 @@ sub snapro_activate {
     map_vdisk($scfg, $storeid, $v) if !@$maps;
     my $info = vdisk_info($scfg, $storeid, $v) or die "storwize: '$v' not found\n";
     file_set_contents(snapro_file($storeid, $key), "$info->{vdisk_UID}\n", 0600);
-    snapro_wait_dev($scfg, $info->{vdisk_UID});
+    snapro_wait_dev($scfg, $info->{vdisk_UID}, $storeid);
     return 1;
 }
 
@@ -1632,6 +1696,7 @@ sub status {
         warn "storwize: trash: $@" if $@;
         eval { snapro_purge($scfg, $storeid) } if snapmode($scfg) eq 'volumegroup';
         warn "storwize: snapshot access: $@" if $@;
+        eval { install_warn() };
     }
     my $ostamp = run_dir($storeid) . "/orphan-sweep";
     if (time() - ((stat($ostamp))[9] // 0) >= $ORPHAN_SWEEP_EVERY) {
@@ -1856,7 +1921,13 @@ sub activate_volume {
         die "storwize: device $dev did not appear after ${DEV_WAIT}s"
             . " (check zoning/mapping and 'multipath -ll')\n" if time() > $deadline;
         sleep(1);
-        if (++$n % 5 == 0) {
+        if (++$n == 8) {
+            # Dead maps of volumes deleted moments ago can still hold the SCSI LUN id the array just reused for
+            # this one, so the rescan never sees it. Do not wait for the periodic sweep: clear them now.
+            eval { orphan_sweep($scfg, $storeid) };
+            warn "storwize: orphan multipath maps: $@" if $@;
+        }
+        if ($n % 5 == 0) {
             rescan_hosts($scfg);
             multipath_add($wwid);
         }

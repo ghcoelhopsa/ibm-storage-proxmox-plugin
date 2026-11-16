@@ -33,7 +33,7 @@ from sv import Array, ArrayError, capabilities, enable_mux, scan_host_keys
 from nodes import LVM_FILTER_SCRIPT, MULTIPATH_CONF, NVME_IOPOLICY_RULE, NodeError, NodeSSH, sh
 from pve import PVE, PVEError
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "..", "static")
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -1724,6 +1724,9 @@ def nodes(s=Depends(session)):
             st = nodessh.status(n.get("ip"))
             item.update(managed=True, **st)
             item["plugin_current"] = plugin_ver
+            # same version number but other content: changed by hand on the node
+            item["modified"] = ((release_diff(st.get("files"), "plugin") if st.get("plugin") == plugin_ver else [])
+                                + (release_diff(st.get("files"), "cbt") if st.get("cbt") == VERSION else []))
             item["multipath_ok"] = st["multipath_conf"].strip() == MULTIPATH_CONF.strip() or st["multipath_has_2145"]
             item["multipath_diff"] = nodessh.multipath_diff(st["multipath_conf"] + "\n")
         except Exception as e:
@@ -1760,6 +1763,41 @@ def plugin_version():
         return re.search(r"our \$VERSION = '([^']+)'", src).group(1)
     except Exception:
         return None
+
+
+# Files Prepare node installs, by set, as node path -> asset name. Each set gets a manifest with
+# the sha256 of what was installed (MANIFEST_DIR/<set>.sha256), which the plugin checks every
+# hour; the node card compares the files on the node with this release and with the other nodes.
+MANIFEST_DIR = "/usr/share/ibm-storage-plugin"
+INSTALL_SETS = {
+    "plugin": {"/usr/share/perl5/PVE/Storage/Custom/StorwizePlugin.pm": "StorwizePlugin.pm",
+               "/usr/share/perl5/PVE/Storage/Custom/FlashSystemPlugin.pm": "FlashSystemPlugin.pm",
+               "/usr/local/sbin/pve-ibm-storage": "pve-ibm-storage"},
+    "cbt": {f"/usr/local/lib/ibm-storage-cbt/{f}": f
+            for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "file_restore.py", "sw-snap.pl")},
+}
+_ASSET_SHA = {}
+
+
+def asset_sha(name):
+    if name not in _ASSET_SHA:
+        _ASSET_SHA[name] = hashlib.sha256(open(os.path.join(ASSETS, name), "rb").read()).hexdigest()
+    return _ASSET_SHA[name]
+
+
+def install_manifest(ip, set_name):
+    nodessh.put(ip, f"{MANIFEST_DIR}/{set_name}.sha256",
+                "".join(f"{asset_sha(a)}  {path}\n" for path, a in INSTALL_SETS[set_name].items()))
+
+
+def release_diff(files, set_name):
+    """Files of a set that are on the node with content other than this release's."""
+    out = []
+    for path, a in INSTALL_SETS[set_name].items():
+        have = (files or {}).get(path)
+        if have and have != asset_sha(a):
+            out.append(path)
+    return out
 
 
 @app.post("/api/nodes/{node}/prepare")
@@ -1810,6 +1848,8 @@ async def node_prepare(node: str, request: Request, s=Depends(admin)):
             for f in ("cbt_backup.py", "cbt_job.py", "cbt_sched.py", "cbt_perf.py", "file_restore.py", "sw-snap.pl"):
                 nodessh.put(ip, f"{CBT_DIR}/{f}", open(os.path.join(ASSETS, f)).read(), 0o755)
             nodessh.put(ip, f"{CBT_DIR}/VERSION", f"{VERSION}\n")
+            run("install manifest", f"mkdir -p {MANIFEST_DIR}")
+            install_manifest(ip, "cbt")
             run("snapshot backup: validation", f"python3 -c 'import nbd' && perl -c {CBT_DIR}/sw-snap.pl 2>&1 && "
                 f"python3 -m py_compile {CBT_DIR}/cbt_backup.py {CBT_DIR}/file_restore.py && echo ok")
         if b.get("plugin"):
@@ -1820,6 +1860,8 @@ async def node_prepare(node: str, request: Request, s=Depends(admin)):
                         open(os.path.join(ASSETS, "FlashSystemPlugin.pm")).read())
             nodessh.put(ip, "/usr/local/sbin/pve-ibm-storage", open(os.path.join(ASSETS, "pve-ibm-storage")).read(), 0o755)
             run("old command name", "rm -f /usr/local/sbin/pve-storwize")
+            run("install manifest", f"mkdir -p {MANIFEST_DIR}")
+            install_manifest(ip, "plugin")
             run("plugin validation", "perl -MPVE::Storage -e 'PVE::Storage::Plugin->lookup(\"storwize\") "
                                      "&& PVE::Storage::Plugin->lookup(\"flashsystem\") or die; print \"plugin $PVE::Storage::Custom::StorwizePlugin::VERSION ok\\n\"'")
             run("services", "mkdir -p /etc/pve/priv/storwize; chmod 700 /etc/pve/priv/storwize 2>/dev/null; "
@@ -2612,6 +2654,14 @@ def backup_overview(s):
                 pve_jobs.append({"id": j.get("id"), "all": bool(to_int(j.get("all"))), "vmids": [to_int(x) for x in str(j.get("vmid") or "").split(",") if x]})
     except HTTPException:
         pass
+    pools = []
+    try:
+        # GET /pools lists no members (PVE 9); the guests carry their pool in /cluster/resources
+        pools = sorted(({"pool": p.get("poolid"), "members": sum(1 for g in guests.values()
+                                                                 if g.get("pool") == p.get("poolid") and g.get("type") == "qemu" and not g.get("template"))}
+                        for p in pcall(s, "GET", "/pools") or [] if p.get("poolid")), key=lambda p: p["pool"])
+    except HTTPException:
+        pass
     limits = {n: to_int((d.get("settings") or {}).get("max_parallel")) or backup.DEFAULT_PARALLEL
               for n, d in nodes.items() if not d.get("error")}
     first = next((d.get("settings") or {} for d in nodes.values() if not d.get("error")), {})
@@ -2621,7 +2671,7 @@ def backup_overview(s):
                          "latency_start_ms": first.get("latency_start_ms", backup.DEFAULT_LAT_START),
                          "latency_throttle_ms": first.get("latency_throttle_ms", backup.DEFAULT_LAT_THROTTLE)},
             "schedules": sorted(scheds.values(), key=lambda c: c["name"].lower()),
-            "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs,
+            "recent": sorted(recent, key=lambda r: -r["id"])[:20], "pve_jobs": pve_jobs, "pools": pools,
             "nodes": {n: {"error": d.get("error"), "installed": d.get("installed")} for n, d in nodes.items()},
             "vms": sorted(({"vmid": g["vmid"], "name": g.get("name"), "node": g.get("node")} for g in guests.values() if g.get("type") == "qemu" and not g.get("template")),
                           key=lambda g: g["vmid"])}

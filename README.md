@@ -282,9 +282,19 @@ pve-ibm-storage info v7k            # system, pool and supported features
 pve-ibm-storage inventory           # guest <-> volume (UID, size, snapshots, local device)
 pve-ibm-storage orphans             # volumes with the prefix that no guest uses
 pve-ibm-storage stale-paths         # local multipath maps of volumes no longer mapped here (--remove)
+pve-ibm-storage verify              # installed files on every node: changed since install, or different between nodes
 pve-ibm-storage trash               # removed disks still kept on the array
 pve-ibm-storage --json inventory    # the same data as JSON
 ```
+
+### Installed files
+
+Prepare node and `scripts/install.sh` record the sha256 of every file they install
+(`/usr/share/ibm-storage-plugin/*.sha256`). A file changed on a node afterwards keeps the version
+number, so the plugin checks the files every hour and writes a warning to the Proxmox log
+(`journalctl -u pvestatd`); **Proxmox nodes** in the panel shows the changed files and the files
+that differ between nodes; `pve-ibm-storage verify` compares all nodes from the command line (exit
+code 1 when something differs). Prepare node puts the release files back.
 
 ### Trash
 
@@ -362,6 +372,10 @@ usual way. If the snapshot path fails, the job falls back to the regular Proxmox
 
 Schedules are created on the **Backups** page. Each schedule becomes a systemd timer on the nodes,
 so it runs even when the panel is down. Retention is whatever is configured in PBS.
+
+A schedule picks VMs one by one, Proxmox resource pools, or both. Pool members are read at every
+run, so a VM added to the pool (by hand or by a portal that creates VMs) is backed up from the next
+run on, with no change to the schedule.
 
 **Storage latency control.** The backup watches the array volume latency: above the start limit
 (default 20 ms) new backups wait, above the slow-down limit (default 30 ms) running ones read with

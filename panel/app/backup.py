@@ -67,6 +67,9 @@ print(json.dumps({"units": units, "logs": logs, "progress": prog, "schedules": s
 PYEOF"""
 
 
+POOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
 def new_id():
     return secrets.token_hex(4)
 
@@ -83,8 +86,11 @@ def validate(b, pbs_ids):
         vmids = sorted({int(v) for v in b.get("vmids") or []})
     except (TypeError, ValueError):
         raise ValueError("invalid VM list")
-    if not vmids or any(v < 100 or v > 999999999 for v in vmids):
-        raise ValueError("choose at least one VM")
+    pools = sorted({str(p) for p in b.get("pools") or []})
+    if any(not POOL_RE.match(p) for p in pools):
+        raise ValueError("invalid pool name")
+    if (not vmids and not pools) or any(v < 100 or v > 999999999 for v in vmids):
+        raise ValueError("choose at least one VM or pool")
     if b.get("pbs") not in pbs_ids:
         raise ValueError("choose a valid PBS storage")
     if not TIME_RE.match(str(b.get("time", ""))):
@@ -96,7 +102,7 @@ def validate(b, pbs_ids):
         raise ValueError("invalid number of simultaneous VMs")
     if not 1 <= parallel <= MAX_PARALLEL:
         raise ValueError(f"simultaneous VMs: from 1 to {MAX_PARALLEL}")
-    return {"id": sid, "name": name, "vmids": vmids, "pbs": b["pbs"], "time": b["time"], "days": days, "parallel": parallel,
+    return {"id": sid, "name": name, "vmids": vmids, "pools": pools, "pbs": b["pbs"], "time": b["time"], "days": days, "parallel": parallel,
             "fallback": bool(b.get("fallback", True)), "protected": bool(b.get("protected", False)), "enabled": bool(b.get("enabled", True))}
 
 
